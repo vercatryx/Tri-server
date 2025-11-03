@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Auto Login Options</title>
+    <style>
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto; margin:24px; max-width:720px;}
+        label{display:block; margin:12px 0 6px; font-weight:600;}
+        input[type="text"], input[type="password"]{width:100%; padding:10px; border:1px solid #d0d5dd; border-radius:8px;}
+        .row{margin-top:16px;}
+        button{padding:10px 16px; border:0; border-radius:8px; cursor:pointer;}
+        .primary{background:#2563eb; color:white;}
+    </style>
+</head>
+<body>
+<h1>Unite Us: Auto Login</h1>
+<p>Set your default credentials for the one-click login flow.</p>
+<label for="email">Email</label>
+<input id="email" type="text" placeholder="you@example.com" />
+
+<label for="password">Password (optional)</label>
+<input id="password" type="password" placeholder="••••••••" />
+
+<div class="row">
+    <label><input id="autoSubmit" type="checkbox" /> Auto-submit on step 2 (if possible)</label>
+</div>
+
+<div class="row">
+    <button id="save" class="primary">Save</button>
+    <span id="status" style="margin-left:12px;"></span>
+</div>
+
+<script>
+    (async function init(){
+        const { email, password, autoSubmit } = await chrome.storage.sync.get({
+            email: "", password: "", autoSubmit: false
+        });
+        document.getElementById("email").value = email || "";
+        document.getElementById("password").value = password || "";
+        document.getElementById("autoSubmit").checked = !!autoSubmit;
+    })();
+
+    document.getElementById("save").addEventListener("click", async () => {
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
+        const autoSubmit = document.getElementById("autoSubmit").checked;
+        await chrome.storage.sync.set({ email, password, autoSubmit });
+        const status = document.getElementById("status");
+        status.textContent = "Saved ✓";
+        setTimeout(() => status.textContent = "", 1500);
+    });
+</script>
+</body>
+</html>

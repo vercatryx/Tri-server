@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Manual Mode — Diet Fantasy</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card: #111827;
+            --muted: #9ca3af;
+            --text: #e5e7eb;
+            --line: #1f2937;
+            --primary: #3b82f6;
+            --primary-600: #2563eb;
+            --success: #10b981;
+            --warn: #f59e0b;
+            --radius: 10px;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            justify-content: center;
+            padding: 16px;
+        }
+        .wrap {
+            width: 100%;
+            max-width: 520px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            height: 100vh;
+        }
+        #screenManual {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            min-height: 0;
+        }
+        .content-area {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .manual-card, .create-card {
+            background: var(--card);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 16px;
+            width: 100%;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+        }
+        h2 { margin: 0 0 10px 0; font-size: 18px; color: #e5e7eb; }
+
+        /* Inputs section */
+        label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+        input[type="date"], input[type="number"] {
+            background: #0b1222;
+            color: var(--text);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 8px;
+        }
+        .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+
+        /* Buttons */
+        button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+            font-weight: 500;
+        }
+        #btnGenAndUpload { background: var(--primary); color: #fff; }
+        #enterBillingBtn { background: var(--success); color: #052e16; }
+        #btnUploadPDF   { background: var(--warn); color: #1f1300; }
+        #btnCreateUser  { background: #334155; color: #e5e7eb; border: 1px solid #243042; width: 100%; margin-bottom: 12px; }
+        .btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+
+        /* Log bar and log section (matching auto tab) */
+        .logbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            border-top: 2px solid var(--line);
+            border-bottom: 1px solid var(--line);
+            background: var(--card);
+        }
+        .logtitle {
+            font-size: 12px;
+            color: #cbd5e1;
+            opacity: .9;
+        }
+        .logbtns {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .btn.micro {
+            padding: 4px 10px;
+            border-radius: 14px;
+            font-size: 12px;
+            line-height: 1;
+            color: #e5e7eb;
+            background: #6b7280;
+            cursor: pointer;
+            border: none;
+        }
+        .btn.micro:hover {
+            background: #4b5563;
+        }
+        .log-section {
+            flex: 0 0 150px;
+            height: 150px;
+            display: flex;
+            flex-direction: column;
+        }
+        #status {
+            padding: 6px 12px;
+            font-size: 12px;
+            color: var(--muted);
+            background: #0b1222;
+            border-bottom: 1px solid var(--line);
+        }
+        #out {
+            flex: 1;
+            background: #0b1222;
+            color: #cbd5e1;
+            padding: 8px 12px;
+            overflow-y: auto;
+            font-size: 12px;
+            font-family: ui-monospace, Menlo, Consolas, monospace;
+            margin: 0;
+        }
+
+        /* Identify strip (fixed ~250px) */
+        .identify {
+            background: #0b1222;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            padding: 10px;
+            height: 250px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .identify .head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .badge {
+            font-size: 11px; padding: 2px 6px; border-radius: 999px;
+            background: #1f2937; color: #cbd5e1; border: 1px solid #233044;
+        }
+        .identify input[type="search"] {
+            flex: 1;
+            background: #0a1120; border: 1px solid var(--line);
+            color: var(--text); border-radius: 8px; padding: 6px 8px;
+        }
+        .identify .list {
+            flex: 1; overflow: auto;
+            border: 1px solid var(--line); border-radius: 8px; background: #0a1224;
+        }
+        .identify .item {
+            padding: 6px 8px; border-bottom: 1px solid #101826; cursor: pointer;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .identify .item:last-child { border-bottom: none; }
+        .identify .item.sel { background: #0f1a33; }
+        .identify .btnRow { display: flex; gap: 8px; }
+        .identify .btnRow .btn { flex: 1; background: var(--success); color: #062a23; border: 1px solid #059669; }
+
+        /* Screen toggling */
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <!-- SCREEN: Manual tools -->
+    <div id="screenManual">
+        <div class="content-area">
+            <button id="btnCreateUser">Create New User</button>
+
+            <div class="manual-card">
+                <h2>Manual Mode</h2>
+                <div class="input-grid">
+                    <label>
+                        Attestation Date
+                        <input id="attestationDate" type="date">
+                    </label>
+                    <label>
+                        Start Date
+                        <input id="startDate" type="date">
+                    </label>
+                    <label>
+                        End Date
+                        <input id="endDate" type="date">
+                    </label>
+                    <label>
+                        Rate per Day
+                        <input id="ratePerDay" type="number" min="0" step="1" placeholder="48">
+                    </label>
+                </div>
+
+                <div class="btn-row">
+                    <button id="enterBillingBtn">Enter Billing</button>
+                </div>
+                <div class="btn-row">
+                    <button id="btnGenAndUpload">Generate PDF & Upload</button>
+                </div>
+                <div class="btn-row">
+                    <button id="btnUploadPDF">Upload Dummy PDF</button>
+                </div>
+            </div>
+
+            <!-- Identify missing case/client IDs -->
+            <div class="identify">
+                <div class="head">
+                    <span class="badge">Identify missing links</span>
+                    <input id="idSearch" type="search" placeholder="Search missing by name…">
+                </div>
+                <div id="idList" class="list"></div>
+                <div class="btnRow">
+                    <button id="btnLinkCurrent" class="btn">Connect selected to current tab</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log bar and log section (fixed at bottom) -->
+        <div class="logbar">
+            <div class="logtitle">Logs</div>
+            <div class="logbtns">
+                <button class="btn micro" id="btnClearLog">Clear</button>
+            </div>
+        </div>
+        <div class="log-section">
+            <div id="status"></div>
+            <pre id="out"></pre>
+        </div>
+    </div>
+
+    <!-- SCREEN: Create User (loaded from its own HTML/JS) -->
+    <div id="screenCreate" class="create-card hidden">
+        <!-- content injected from create-user.html -->
+    </div>
+</div>
+
+<script src="manual.js"></script>
+</body>
+</html>

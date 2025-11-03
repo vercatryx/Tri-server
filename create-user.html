@@ -1,0 +1,83 @@
+<!-- This file is injected into #screenCreate by manual.js -->
+<div class="create-header" style="display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px;">
+    <h2 style="margin:0; font-size:18px; color:#e5e7eb;">Create New Client</h2>
+    <div style="display:flex; gap:8px;">
+        <button id="cuBackBtn" style="background:#0f172a; color:#e5e7eb; border:1px solid #233044; padding:8px 10px; border-radius:10px; cursor:pointer;">Back</button>
+        <button id="cuAttemptBtn" title="Read details from the current page" style="background:#0b1222; color:#e5e7eb; border:1px solid #22304a; padding:8px 10px; border-radius:10px; cursor:pointer;">
+            Attempt Auto (from page)
+        </button>
+    </div>
+</div>
+
+<!-- Unite Us URL (required) -->
+<div style="display:flex; flex-direction:column; gap:6px; margin-bottom:12px;">
+    <label style="font-size:12px; color:#9ca3af; display:flex; flex-direction:column; gap:4px;">
+        Unite Us Case URL (required)
+        <input id="cuCaseUrl" type="text" placeholder="https://app.uniteus.io/dashboard/cases/open/{CASE_ID}/contact/{CLIENT_ID}"
+               style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;">
+    </label>
+    <div id="cuCaseUrlHelp" style="font-size:11px; color:#9ca3af;">Paste the full URL from Unite Us</div>
+    <div id="cuParsed" style="font-size:11px; color:#86efac; display:none;"></div>
+</div>
+
+<!-- Core fields -->
+<div class="cu-grid" style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;">
+    <label>First<input id="cuFirst" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>Last<input id="cuLast" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>Address<input id="cuAddress" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>Apt<input id="cuApt" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>City<input id="cuCity" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>State<input id="cuState" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>ZIP<input id="cuZip" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>Phone<input id="cuPhone" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>Email<input id="cuEmail" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label>County<input id="cuCounty" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;"></label>
+    <label style="grid-column:1 / span 2;">Dislikes
+        <input id="cuDislikes" type="text" style="background:#0b1222; color:#e5e7eb; border:1px solid #1f2937; border-radius:10px; padding:8px;">
+    </label>
+</div>
+
+<!-- Flags -->
+<div style="margin-bottom:12px;">
+    <div style="font-size:12px; color:#9ca3af; margin-bottom:6px;">Flags</div>
+    <div style="display:flex; gap:14px; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px;"><input id="cuMedicaid" type="checkbox" checked>Medicaid</label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px;"><input id="cuPaused" type="checkbox">Paused</label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px;"><input id="cuComplex" type="checkbox">Complex</label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px;"><input id="cuBill" type="checkbox" checked>Bill</label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:13px;"><input id="cuDelivery" type="checkbox" checked>Delivery</label>
+    </div>
+</div>
+
+<!-- Schedule -->
+<div style="margin:12px 0;">
+    <div style="font-size:12px; color:#9ca3af; margin-bottom:6px;">Weekly Schedule</div>
+    <div id="cuSchedule" style="display:flex; gap:12px; flex-wrap:wrap; font-size:13px;">
+        <!-- built by JS -->
+    </div>
+</div>
+
+<!-- Geocoding -->
+<div style="padding:10px; border:1px solid #1f2937; border-radius:8px; margin-bottom:12px;">
+    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <div style="font-size:12px; color:#9ca3af;">Location</div>
+        <div id="cuBusy" style="font-size:11px; color:#9ca3af; display:none;">…</div>
+        <div style="flex:1;"></div>
+        <button id="cuBtnAuto" style="background:#0b1222; color:#e5e7eb; border:1px solid #22304a; padding:6px 10px; border-radius:8px;">Auto Geocode</button>
+        <button id="cuBtnSugg" style="background:#0b1222; color:#e5e7eb; border:1px solid #22304a; padding:6px 10px; border-radius:8px;">See Suggestions</button>
+    </div>
+    <div id="cuGeoMsg" style="font-size:11px; color:#86efac; margin-top:6px; display:none;"></div>
+    <div id="cuGeoErr" style="font-size:11px; color:#fca5a5; margin-top:6px; display:none;"></div>
+    <div id="cuCands" style="margin-top:8px; border:1px dashed #334155; border-radius:8px; max-height:180px; overflow:auto; display:none;"></div>
+</div>
+
+<!-- Footer: Create button at bottom -->
+<div style="display:flex; justify-content:flex-end;">
+    <button id="cuSaveBtn" disabled
+            style="background:#3b82f6; opacity:0.6; color:#fff; padding:10px 14px; border-radius:10px; border:none; cursor:not-allowed;">
+        Create
+    </button>
+</div>
+
+<!-- Footer status -->
+<div id="cuStatus" style="margin-top:10px; font-size:13px; color:#9ca3af; min-height:20px;"></div>
