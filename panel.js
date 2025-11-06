@@ -8,8 +8,8 @@
     const READY_XP = '//*[@id="container"]/div[2]/main/div/section/div';
 
     // Timings
-    const BILLING_GRACE_MS = 2500;         // short grace after injection
-    const VERIFY_TIMEOUT_MS = 15000;       // verify window
+    const BILLING_GRACE_MS = 1500;         // short grace after injection (1.5s)
+    const VERIFY_TIMEOUT_MS = 3000;       // verify window
     const VERIFY_INTERVAL_MS = 400;        // poll rate
 
     // ----- DOM -----
@@ -40,25 +40,33 @@
     // ----- State -----
     const MODE_KEY="df_panel_mode", LOG_KEY="df_panel_log", SKIPS_KEY="df_panel_skips",
         OPTS_KEY="df_panel_opts", SEARCH_KEY="df_panel_search", ERRORS_KEY="df_panel_errors_only",
-        MANUAL_PARAMS_KEY="df_manual_params";
+        MANUAL_PARAMS_KEY="df_manual_params", UNITEUS_STORE_KEY="df_uniteus_creds";
     let mode=localStorage.getItem(MODE_KEY)||"auto";
     let users=[], filtered=[], perUserState=new Map();
     let q = localStorage.getItem(SEARCH_KEY) || "";
     let errorsOnly = localStorage.getItem(ERRORS_KEY) === "1";
 
     // Auto-run flags
-    let isRunning=false, isPaused=false, stopRequested=false, lockedTabId=null;
+    let isRunning=false, isPaused=false, stopRequested=false, lockedTabId=null, duplicateFoundInBilling = false;
+
+    // Listen for duplicate found message from content script
+    chrome.runtime.onMessage.addListener((msg) => {
+        if (msg?.type === 'DF_BILLING_DUPLICATE_FOUND') {
+            log('Duplicate found message received from content script.');
+            duplicateFoundInBilling = true;
+        }
+    });
 
     // ----- Helpers -----
     const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
     const stamp=()=>new Date().toLocaleTimeString();
     // const log=(line,obj)=>{ const msg=`[${stamp()}] ${line}${obj?(" "+JSON.stringify(obj)):""}\n`; logEl.textContent+=msg; logEl.scrollTop=logEl.scrollHeight; const c=localStorage.getItem(LOG_KEY)||""; localStorage.setItem(LOG_KEY,c+msg); };
     const log = (line, obj) => {
-        const msg = `[${stamp()}] ${line}${obj ? " " + JSON.stringify(obj, null, 2) : ""}\n`;
-        logEl.textContent += msg + "\n";
+        const msg = `\n[${stamp()}] ${line}${obj ? " " + JSON.stringify(obj, null, 2) : ""}`;
+        logEl.textContent += msg;
         logEl.scrollTop = logEl.scrollHeight;
         const c = localStorage.getItem(LOG_KEY) || "";
-        localStorage.setItem(LOG_KEY, c + msg + "\n");
+        localStorage.setItem(LOG_KEY, c + msg);
     };
     const restoreLog=()=>{ const c=localStorage.getItem(LOG_KEY); if(c){ logEl.textContent=c; logEl.scrollTop=logEl.scrollHeight; } };
 
@@ -356,25 +364,98 @@
         }
 
         // --- Billing (strict confirm) ---
-        // --- Billing (strict confirm + retry 5×) ---
+        // --- Billing (with simple precheck) ---
         if (opts.attemptBilling) {
+            duplicateFoundInBilling = false; // Reset flag for current user
             try {
                 const expect = expectFrom(u, opts);
 
-                // 0) duplicate precheck
+                // Clear any previous billing result from prior user
+                await sendBg({
+                    type: "DF_EXEC_SCRIPT",
+                    code: "delete window.__billingResult; delete window.__BILLING_INPUTS__;"
+                });
+
+                // SIMPLE PRECHECK - Does this invoice already exist?
+                log(`Checking for existing invoice`, { user: u.name, dates: `${expect.startMDY} → ${expect.endMDY}`, amount: expect.amount });
                 const pre = await sendBg({ type: "DF_BILLING_PRECHECK", expect });
+
                 if (pre?.ok && pre.exists) {
-                    log(`Billing already exists`, { user: u.name });
-                    const rec = await recordBillingSuccess(u, opts, { exists: true });
-                    if (!rec.ok) { anyWarn = true; reasons.push("Already existed · record failed"); }
-                    else { reasons.push("Already existed"); }
+                    const dupMsg = `⚠️ DUPLICATE INVOICE - ${u.name} (${expect.startMDY} → ${expect.endMDY}, $${expect.amount})`;
+                    console.warn(`%c${dupMsg}`, 'background: #ff9800; color: white; padding: 4px 8px; font-weight: bold;');
+                    log(dupMsg, { user: u.name, dates: `${expect.startMDY} → ${expect.endMDY}` });
+                    reasons.push(`⚠️ Duplicate invoice`);
                     mark(u, "ok", reasons.join(" · "));
                     return;
                 }
 
+                log(`No duplicate found, proceeding with billing`, { user: u.name });
+
+                // Now inject and verify with duplicate check before each attempt
                 let confirmed = false;
                 for (let attempt = 1; attempt <= 5 && !confirmed; attempt++) {
+                    if (duplicateFoundInBilling) {
+                        log(`Billing loop terminated early due to duplicate found signal.`);
+                        reasons.push(`⚠️ Duplicate invoice (detected by injected script)`);
+                        mark(u, "warn", reasons.join(" · "));
+                        confirmed = true; // Mark as "handled" to avoid "could not confirm" message
+                        break;
+                    }
+
                     log(`Billing attempt ${attempt}/5`, { user: u.name });
+
+                    // Check for duplicate BEFORE this attempt
+                    log(`🔍 Checking for duplicate before attempt ${attempt}`, { user: u.name });
+
+                    // Log to page console
+                    await chrome.scripting.executeScript({
+                        target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                        func: (attempt) => {
+                            console.log(`\n${'='.repeat(60)}`);
+                            console.log(`[📋 PANEL] PRECHECK BEFORE ATTEMPT ${attempt}`);
+                            console.log('='.repeat(60));
+                        },
+                        args: [attempt]
+                    });
+
+                    const dupCheck = await sendBg({ type: "DF_BILLING_PRECHECK", expect });
+
+                    // Log result to page console
+                    await chrome.scripting.executeScript({
+                        target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                        func: (dupCheck) => {
+                            console.log('[📋 PANEL] Precheck result:', dupCheck);
+                        },
+                        args: [dupCheck]
+                    });
+
+                    if (dupCheck?.ok && dupCheck.exists) {
+                        const dupMsg = `⚠️ DUPLICATE INVOICE DETECTED on attempt ${attempt} - ${u.name} (${expect.startMDY} → ${expect.endMDY}, $${expect.amount})`;
+
+                        await chrome.scripting.executeScript({
+                            target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                            func: (msg) => {
+                                console.warn(`%c${msg}`, 'background: #ff9800; color: white; padding: 4px 8px; font-weight: bold;');
+                            },
+                            args: [dupMsg]
+                        });
+
+                        log(dupMsg, { user: u.name, attempt });
+                        reasons.push(`⚠️ Duplicate invoice (detected on attempt ${attempt})`);
+                        mark(u, "ok", reasons.join(" · "));
+                        confirmed = true; // Stop trying
+                        break;
+                    }
+
+                    await chrome.scripting.executeScript({
+                        target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                        func: (exists) => {
+                            console.log(`[📋 PANEL] ✓ No duplicate found (dupCheck.exists = ${exists})`);
+                        },
+                        args: [dupCheck?.exists]
+                    });
+
+                    log(`✓ No duplicate found, proceeding with injection`, { user: u.name, attempt });
 
                     await setBillingArgsOnPage({
                         startISO: opts.dates.start,
@@ -385,7 +466,7 @@
 
                     await injectBillingModuleIIFE();
                     log(`Billing script injected`, { user: u.name, attempt });
-                    await sleep(BILLING_GRACE_MS);
+                    await sleep(1000); // Wait 1s after injection
 
                     const ver = await sendBg({
                         type: "DF_BILLING_VERIFY",
@@ -403,7 +484,7 @@
                     }
 
                     log(`Billing attempt ${attempt} did not confirm`, { note: ver?.note || "unknown" });
-                    if (attempt < 5) await sleep(3000); // wait 3 s before next attempt
+                    if (attempt < 5) await sleep(2000); // wait 2s before next attempt
                 }
 
                 if (!confirmed) {
@@ -467,6 +548,95 @@
         setRunningUI(false);
         log(`Auto run finished.`);
     }
+
+    // ----- UnitedUs Login -----
+    const btnUnitedUsLogin = document.getElementById("btnUnitedUsLogin");
+
+    async function loadUniteusCredentials() {
+        try {
+            const result = await chrome.storage.sync.get([UNITEUS_STORE_KEY]);
+            if (result[UNITEUS_STORE_KEY]) {
+                return result[UNITEUS_STORE_KEY];
+            }
+            // Return defaults
+            return { email: "orit@dietfantasy.com", password: "Diet1234fantasy", autoSubmit: true };
+        } catch (e) {
+            log("Failed to load UnitedUs credentials", { error: e?.message || String(e) });
+            return { email: "orit@dietfantasy.com", password: "Diet1234fantasy", autoSubmit: true };
+        }
+    }
+
+    btnUnitedUsLogin.onclick = async () => {
+        try {
+            log("Starting UnitedUs login flow...");
+
+            // Load credentials
+            const creds = await loadUniteusCredentials();
+            const email = creds.email || "orit@dietfantasy.com";
+            const password = creds.password || "Diet1234fantasy";
+
+            // Get current tab
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tab?.id) throw new Error("No active tab");
+
+            // Navigate to UnitedUs auth page
+            await chrome.tabs.update(tab.id, { url: 'https://app.auth.uniteus.io/' });
+            log("Navigating to UnitedUs auth page...");
+
+            // Wait a moment for navigation
+            await sleep(1000);
+
+            // Inject loginFlow.js
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                files: ['modules/loginFlow.js']
+            });
+
+            // Send settings to loginFlow
+            await chrome.tabs.sendMessage(tab.id, {
+                type: 'LOGIN_FLOW_SETTINGS',
+                email: email
+            });
+            log("Injected login flow script", { email });
+
+            // Set up listener for step 2 (when redirected to password page)
+            const listener = async (tabId, changeInfo, updatedTab) => {
+                if (tabId === tab.id && changeInfo.status === 'complete') {
+                    // Check if we're on the password page
+                    if (updatedTab.url && updatedTab.url.includes('app.auth.uniteus.io/login')) {
+                        log("Detected password page, injecting step2 script...");
+
+                        // Wait a moment for page to fully load
+                        await sleep(500);
+
+                        // Inject step2Patch.js
+                        await chrome.scripting.executeScript({
+                            target: { tabId: tab.id },
+                            files: ['modules/step2Patch.js']
+                        });
+
+                        // Send step 2 settings
+                        await chrome.tabs.sendMessage(tab.id, {
+                            type: 'STEP2_SETTINGS',
+                            email: email,
+                            password: password,
+                            autoSubmit: true
+                        });
+
+                        // Remove listener after step 2 is handled
+                        chrome.tabs.onUpdated.removeListener(listener);
+
+                        log("UnitedUs login flow completed");
+                    }
+                }
+            };
+
+            chrome.tabs.onUpdated.addListener(listener);
+
+        } catch (e) {
+            log("UnitedUs login failed", { error: e?.message || String(e) });
+        }
+    };
 
     // ----- Wire UI -----
     tabAuto.onclick   = ()=>{ mode="auto";   localStorage.setItem(MODE_KEY,mode); reflectTabs(); };

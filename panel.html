@@ -41,6 +41,8 @@
         /* AUTO */
         #autoWrap{ display:flex; flex-direction:column; flex:1 1 auto; min-height:0 }
         .controls{ padding:10px 12px; display:flex; flex-direction:column; gap:8px; border-bottom:2px solid var(--line-strong) }
+
+
         .rowA{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
         .rowB{ display:flex; align-items:center; gap:8px; flex-wrap:wrap }
 
@@ -95,8 +97,10 @@
 
         .log{ flex:0 0 var(--log-h); height:var(--log-h); overflow:auto; padding:8px 12px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:#cbd5e1; background:#0b1222 }
 
-        .foot{ padding:8px 12px; border-top:2px solid var(--line-strong); display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--muted) }
-        .countfoot{ color:#cbd5e1 }
+        .foot{ padding:8px 12px; border-top:2px solid var(--line-strong); display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--muted); gap:8px }
+        .countfoot{ color:#cbd5e1; flex:1 }
+        .foot .btn.slate#btnUnitedUsLogin{ background:var(--btn-blue) }
+        .foot .btn.slate#btnUnitedUsLogin:hover{ background:var(--btn-blue-h) }
 
         /* Manual iframe */
         #manualWrap{ display:none; flex:1 1 auto; min-height:0 }
@@ -157,6 +161,7 @@
     </div>
 
     <div class="foot">
+        <button class="btn slate" id="btnUnitedUsLogin">Login</button>
         <span class="countfoot" id="countFoot">—</span>
         <button class="btn slate" id="btnClose">Close</button>
     </div>

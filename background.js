@@ -204,6 +204,25 @@ async function runVerifyInPage(tabId, expect) {
     const [{ result }] = await chrome.scripting.executeScript({
         target: { tabId },
         func: (expect) => {
+            console.log('[🔍 runVerifyInPage] Checking for duplicates...', { expect });
+
+            // First check if billing module already detected a duplicate
+            const billingResult = window.__billingResult;
+            console.log('[🔍 runVerifyInPage] window.__billingResult =', billingResult);
+
+            if (billingResult && typeof billingResult === 'object') {
+                if (billingResult.duplicate) {
+                    console.log('[🔍 runVerifyInPage] ✅ Billing module previously detected duplicate!');
+                    // Return ok: true so precheck knows duplicate exists
+                    return { ok: true, note: 'duplicate detected by billing module' };
+                }
+                // If billing failed for other reasons, report it
+                if (billingResult.ok === false && billingResult.error) {
+                    console.log('[🔍 runVerifyInPage] ❌ Billing failed:', billingResult.error);
+                    return { ok: false, note: billingResult.error };
+                }
+            }
+
             const norm = (s) => String(s||'').replace(/\s+/g,' ').trim();
             const cents = (v) => {
                 if (typeof v === 'number') return Math.round(v*100);
@@ -225,7 +244,11 @@ async function runVerifyInPage(tabId, expect) {
             const end   = parseMDY(expect.endMDY);
             const wantCents = Math.round((expect.amount || 0) * 100);
 
+            console.log('[🔍 runVerifyInPage] Looking for:', { start, end, wantCents });
+
             const cards = Array.from(document.querySelectorAll('.fee-schedule-provided-service-card'));
+            console.log('[🔍 runVerifyInPage] Found', cards.length, 'invoice cards on page');
+
             for (const card of cards) {
                 const amtEl = card.querySelector('[data-test-element="unit-amount-value"]');
                 const rngEl = card.querySelector('[data-test-element="service-dates-value"], [data-test-element="service-start-date-value"]');
@@ -243,20 +266,59 @@ async function runVerifyInPage(tabId, expect) {
                     e && e.setHours(0,0,0,0);
                 }
 
-                if (Number.isFinite(cardCents) && s && e &&
+                const match = Number.isFinite(cardCents) && s && e &&
                     cardCents === wantCents &&
-                    sameDay(s, start) && sameDay(e, end)) {
+                    sameDay(s, start) && sameDay(e, end);
+
+                if (match) {
+                    console.log('[🔍 runVerifyInPage] ✅ DUPLICATE FOUND! Card matches:', { txtAmt, txtRange });
                     return { ok: true, note: 'matched card' };
                 }
             }
 
             // check for error/draft banners to help debug
             const anyError = !!document.querySelector('[role="alert"], .alert, .error, .toast--error');
+            console.log('[🔍 runVerifyInPage] ❌ No match found among', cards.length, 'cards');
             return { ok: false, note: anyError ? 'page error seen' : 'no match' };
         },
         args: [expect]
     });
     return result || { ok: false, note: 'no-result' };
+}
+
+// Check ONLY for duplicate flag (doesn't verify card creation)
+async function checkDuplicateOnly(tabId, timeoutMs = 3000, intervalMs = 200) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const [{ result }] = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => {
+                const billingResult = window.__billingResult;
+                if (billingResult && typeof billingResult === 'object') {
+                    if (billingResult.duplicate) {
+                        return { duplicate: true, note: billingResult.error || 'duplicate detected' };
+                    }
+                    if (billingResult.ok === true) {
+                        return { duplicate: false, note: 'billing completed' };
+                    }
+                    if (billingResult.ok === false && !billingResult.duplicate) {
+                        return { duplicate: false, error: billingResult.error || 'billing failed' };
+                    }
+                }
+                return null; // Still running
+            }
+        });
+
+        if (result?.duplicate) {
+            return { duplicate: true, note: result.note };
+        }
+        if (result?.duplicate === false) {
+            return { duplicate: false, note: result.note, error: result.error };
+        }
+
+        await new Promise(r => setTimeout(r, intervalMs));
+    }
+    return { duplicate: false, note: "timeout waiting for billing result" };
 }
 
 // Poll verify with short intervals; used after billing IIFE.
@@ -265,6 +327,10 @@ async function verifyBilling(tabId, expect, timeoutMs = 15000, intervalMs = 400)
     while (Date.now() - start < timeoutMs) {
         const r = await runVerifyInPage(tabId, expect);
         if (r?.ok) return { ok: true, note: r.note || "matched" };
+        // If duplicate detected, stop retrying immediately
+        if (r?.duplicate || r?.skipRetry) {
+            return { ok: false, duplicate: true, note: r.note || "duplicate", skipRetry: true };
+        }
         await new Promise(r => setTimeout(r, intervalMs));
     }
     return { ok: false, note: "timeout" };
@@ -272,8 +338,62 @@ async function verifyBilling(tabId, expect, timeoutMs = 15000, intervalMs = 400)
 
 // Also used as a *pre-check* before billing to detect duplicates.
 async function precheckDuplicate(tabId, expect) {
-    const r = await runVerifyInPage(tabId, expect);
-    return !!(r && r.ok);
+    // Log to page console so user can see it
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (attempt) => console.log(`[BACKGROUND->PAGE] ========== PRECHECK STARTING ==========`),
+        args: []
+    });
+
+    // First quick check - see if billing module already detected duplicate
+    const quickCheck = await runVerifyInPage(tabId, expect);
+
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (result) => console.log(`[BACKGROUND->PAGE] Quick check result:`, result),
+        args: [quickCheck]
+    });
+
+    if (quickCheck && quickCheck.ok) {
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => console.log(`[BACKGROUND->PAGE] ✓ DUPLICATE FOUND immediately!`),
+            args: []
+        });
+        return true;
+    }
+
+    // Wait for page to load cards - retry with exponential backoff
+    const delays = [500, 1000, 2000]; // Total ~3.5s wait
+
+    for (let i = 0; i < delays.length; i++) {
+        await new Promise(r => setTimeout(r, delays[i]));
+
+        const r = await runVerifyInPage(tabId, expect);
+
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            func: (i, delay, result) => console.log(`[BACKGROUND->PAGE] Attempt ${i+1} (after ${delay}ms):`, result),
+            args: [i, delays[i], r]
+        });
+
+        if (r && r.ok) {
+            await chrome.scripting.executeScript({
+                target: { tabId },
+                func: (i) => console.log(`[BACKGROUND->PAGE] ✓ DUPLICATE FOUND on attempt ${i+1}!`),
+                args: [i]
+            });
+            return true; // Found matching card
+        }
+    }
+
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (count) => console.log(`[BACKGROUND->PAGE] No duplicate found after ${count} attempts`),
+        args: [delays.length]
+    });
+
+    return false; // No duplicate found after retries
 }
 
 // ===================== Message Bridge =====================
@@ -376,11 +496,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 }
             }
 
+            // --- Execute arbitrary script in page ---
+            if (msg.type === "DF_EXEC_SCRIPT") {
+                const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: (code) => { eval(code); },
+                    args: [msg.code]
+                });
+                sendResponse({ ok: true });
+                return;
+            }
+
             // --- Billing page verification hooks ---
             if (msg.type === "DF_BILLING_PRECHECK") {
                 const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
                 const exists = await precheckDuplicate(tabId, msg.expect || {});
                 sendResponse({ ok: true, exists });
+                return;
+            }
+            if (msg.type === "DF_BILLING_CHECK_DUPLICATE") {
+                const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                const out = await checkDuplicateOnly(tabId, msg.timeoutMs || 3000, msg.intervalMs || 200);
+                sendResponse(out);
                 return;
             }
             if (msg.type === "DF_BILLING_VERIFY") {

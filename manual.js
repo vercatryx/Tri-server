@@ -10,6 +10,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const attDateInput = document.getElementById('attestationDate');
     const ratePerDayInput = document.getElementById('ratePerDay');
 
+    // UnitedUs Login elements
+    const uniteusEmailInput = document.getElementById('uniteus_email');
+    const uniteusPasswordInput = document.getElementById('uniteus_password');
+    const btnUnitedUsLogin = document.getElementById('btnUnitedUsLogin');
+    const uniteusStatusDiv = document.getElementById('uniteus_status');
+
     // Identify strip
     const identifySection = document.querySelector('.identify');
     const idSearch = document.getElementById('idSearch');
@@ -28,6 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const IDENTIFY_URL  = `${API_BASE}/api/ext/identify`;
     const STORE_KEY     = "df_manual_params";
     const IDQ_KEY       = "df_manual_identify_q";
+    const UNITEUS_STORE_KEY = "df_uniteus_creds";
 
     // ---------- State ----------
     let params = { startDate:"", endDate:"", ratePerDay:"48", attestationDate:"" };
@@ -313,8 +320,131 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // ---------- UnitedUs Login ----------
+    // Load saved credentials or use defaults
+    async function loadUniteusCredentials() {
+        try {
+            const result = await chrome.storage.sync.get([UNITEUS_STORE_KEY]);
+            if (result[UNITEUS_STORE_KEY]) {
+                const { email, password } = result[UNITEUS_STORE_KEY];
+                // Only override if we have saved values
+                if (email) uniteusEmailInput.value = email;
+                if (password) uniteusPasswordInput.value = password;
+            }
+            // If no saved values, the HTML defaults will be used (orit@dietfantasy.com / Diet1234fantasy)
+        } catch (e) {
+            console.error('Failed to load UnitedUs credentials:', e);
+        }
+    }
+
+    // Save credentials
+    async function saveUniteusCredentials(email, password) {
+        try {
+            await chrome.storage.sync.set({
+                [UNITEUS_STORE_KEY]: { email, password, autoSubmit: true }
+            });
+        } catch (e) {
+            console.error('Failed to save UnitedUs credentials:', e);
+        }
+    }
+
+    // Auto-save when credentials are edited
+    uniteusEmailInput.addEventListener('change', () => {
+        saveUniteusCredentials(uniteusEmailInput.value, uniteusPasswordInput.value);
+    });
+    uniteusPasswordInput.addEventListener('change', () => {
+        saveUniteusCredentials(uniteusEmailInput.value, uniteusPasswordInput.value);
+    });
+
+    // UnitedUs login button handler
+    btnUnitedUsLogin.addEventListener('click', async () => {
+        const email = uniteusEmailInput.value.trim();
+        const password = uniteusPasswordInput.value;
+
+        if (!email) {
+            uniteusStatusDiv.textContent = 'Please enter an email address';
+            uniteusStatusDiv.style.color = '#fca5a5';
+            return;
+        }
+
+        try {
+            uniteusStatusDiv.textContent = 'Logging in to UnitedUs...';
+            uniteusStatusDiv.style.color = '#9ca3af';
+
+            // Save credentials
+            await saveUniteusCredentials(email, password);
+            log('UnitedUs credentials saved', { email });
+
+            // Get current tab
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+            // Navigate to UnitedUs auth page
+            await chrome.tabs.update(tab.id, { url: 'https://app.auth.uniteus.io/' });
+
+            // Wait a moment for navigation
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Inject loginFlow.js
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                files: ['modules/loginFlow.js']
+            });
+
+            // Send settings to loginFlow
+            await chrome.tabs.sendMessage(tab.id, {
+                type: 'LOGIN_FLOW_SETTINGS',
+                email: email
+            });
+
+            // Set up listener for step 2 (when redirected to password page)
+            const listener = async (tabId, changeInfo, updatedTab) => {
+                if (tabId === tab.id && changeInfo.status === 'complete') {
+                    // Check if we're on the password page (https://app.auth.uniteus.io/login)
+                    if (updatedTab.url && updatedTab.url.includes('app.auth.uniteus.io/login')) {
+                        console.log('[UnitedUs] Detected password page, injecting step2Patch.js');
+
+                        // Wait a moment for page to fully load
+                        await new Promise(resolve => setTimeout(resolve, 500));
+
+                        // Inject step2Patch.js
+                        await chrome.scripting.executeScript({
+                            target: { tabId: tab.id },
+                            files: ['modules/step2Patch.js']
+                        });
+
+                        // Send step 2 settings
+                        await chrome.tabs.sendMessage(tab.id, {
+                            type: 'STEP2_SETTINGS',
+                            email: email,
+                            password: password,
+                            autoSubmit: true
+                        });
+
+                        // Remove listener after step 2 is handled
+                        chrome.tabs.onUpdated.removeListener(listener);
+
+                        uniteusStatusDiv.textContent = 'Login flow completed';
+                        uniteusStatusDiv.style.color = '#86efac';
+                        log('UnitedUs login flow completed');
+                    }
+                }
+            };
+
+            chrome.tabs.onUpdated.addListener(listener);
+
+            uniteusStatusDiv.textContent = 'Navigating to UnitedUs...';
+            log('UnitedUs login flow started');
+
+        } catch (e) {
+            uniteusStatusDiv.textContent = e.message || 'Login failed';
+            uniteusStatusDiv.style.color = '#fca5a5';
+            log('UnitedUs login failed', { error: e.message });
+        }
+    });
+
     // ---------- Boot ----------
     updateIdentifySectionVisibility(); // Initially hide until we know if there are missing users
     loadParams();
+    loadUniteusCredentials(); // Load saved UnitedUs credentials
     fetchUsers();
 });

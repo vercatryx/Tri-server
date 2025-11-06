@@ -239,124 +239,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                     args: [msg.billingParams],
                 });
 
-                // --- Duplicate precheck ---
-                const toDate = (s) => {
-                    if (!s) return null;
-                    const d = new Date(s);
-                    return isNaN(d) ? null : d;
-                };
-                const inclusiveDays = (a, b) => {
-                    const d0 = new Date(a.getFullYear(), a.getMonth(), a.getDate());
-                    const d1 = new Date(b.getFullYear(), b.getMonth(), b.getDate());
-                    return Math.floor((d1 - d0) / 86400000) + 1;
-                };
-
-                const p = msg.billingParams || {};
-                const startD = toDate(p.start);
-                const endD   = toDate(p.end) || startD;
-                const rpd    = Number(p.ratePerDay || 48) || 48;
-
-                let duplicate = false;
-                let matched = null;
-
-                if (startD && endD) {
-                    const days = Math.max(1, inclusiveDays(startD, endD));
-                    const plannedAmount = rpd * days;
-
-                    // 1) Same dates + same amount
-                    const [scan1] = await chrome.scripting.executeScript({
-                        target: { tabId: tab.id },
-                        func: (args) => {
-                            try {
-                                if (!window.invoiceScanner?.findExisting) return { ok:false, error:"invoiceScanner missing" };
-                                const out = window.invoiceScanner.findExisting(args);
-                                return { ok:true, out };
-                            } catch (e) { return { ok:false, error: e?.message || String(e) }; }
-                        },
-                        args: [{ start: startD, end: endD, amount: plannedAmount, requireTitle: null }],
-                    });
-                    const res1 = scan1?.result;
-                    if (res1?.ok && res1.out?.exists) {
-                        duplicate = true;
-                        matched = (res1.out.matches || [])[0] || null;
-                    }
-
-                    // 2) If not, dates-only (ignore amount) — safer “don’t even try”
-                    if (!duplicate) {
-                        const [scan2] = await chrome.scripting.executeScript({
-                            target: { tabId: tab.id },
-                            func: (args) => {
-                                try {
-                                    const norm = (s) => String(s||"").replace(/\s+/g," ").trim();
-                                    const sameDay = (a,b)=>a&&b&&a.getTime()===b.getTime();
-                                    const toD = (v)=>{ const d=new Date(v); if(isNaN(d))return null; d.setHours(0,0,0,0); return d; };
-
-                                    const cards = Array.from(document.querySelectorAll(".fee-schedule-provided-service-card"));
-                                    const tS = toD(args.start), tE = toD(args.end);
-
-                                    let matches = [];
-                                    for (const card of cards) {
-                                        const rangeEl = card.querySelector('[data-test-element="service-dates-value"], [data-test-element="service-start-date-value"]');
-                                        const txt = norm(rangeEl?.textContent);
-                                        if (!txt) continue;
-                                        let s=null, e=null;
-                                        const parts = txt.split(/\s*-\s*/);
-                                        if (parts.length === 2) { s = toD(parts[0]); e = toD(parts[1]); }
-                                        else { s = toD(txt); e = s; }
-                                        if (sameDay(s,tS) && sameDay(e,tE)) {
-                                            matches.push({ datesText: txt });
-                                        }
-                                    }
-                                    return { ok:true, exists: matches.length>0, matches };
-                                } catch (e) { return { ok:false, error: e?.message || String(e) }; }
-                            },
-                            args: [{ start: startD, end: endD }],
-                        });
-                        const res2 = scan2?.result;
-                        if (res2?.ok && res2.exists) {
-                            duplicate = true;
-                            matched = (res2.matches || [])[0] || null;
-                        }
-                    }
-                }
-
-                if (duplicate) {
-                    // Close any open billing shelf (best-effort)
-                    await chrome.scripting.executeScript({
-                        target: { tabId: tab.id },
-                        func: () => {
-                            try {
-                                const byXP = (xp) => document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue || null;
-                                const CANCEL_ID = 'fee-schedule-provided-service-cancel-btn';
-                                const CANCEL_XP = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[10]/button';
-                                const form = document.querySelector('form.payments-track-service');
-                                const isOpen = !!form && (form.offsetParent !== null || (form.getClientRects?.().length||0) > 0);
-                                if (isOpen) {
-                                    const btn = document.getElementById(CANCEL_ID) || byXP(CANCEL_XP);
-                                    btn?.click();
-                                }
-                            } catch {}
-                            // Also tag a result so any polling sees it
-                            window.__billingResult = { ok:false, duplicate:true, error:'Duplicate invoice' };
-                        },
-                    });
-
-                    // Surface as a normal error to Navigator
-                    try {
-                        chrome.runtime.sendMessage({
-                            type: "NAV_PROGRESS",
-                            event: "billing:error",
-                            key: p.key || null,
-                            name: p.name || null,
-                            error: "Duplicate invoice detected (precheck)",
-                        });
-                    } catch {}
-
-                    sendResponse({ ok:false, duplicate:true, match: matched || null, error:"Duplicate invoice" });
-                    return;
-                }
-
-                // --- No duplicate → proceed as before ---
+                // Duplicate check now happens inside enterBillingDetails.js with actual billing dates
                 await chrome.scripting.executeScript({
                     target: { tabId: tab.id },
                     files: ['modules/enterBillingDetails.js'],
@@ -365,7 +248,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                 // Poll page for result
                 let billingResp = null;
                 const t0 = Date.now();
-                while (Date.now() - t0 < 20000) {
+                while (Date.now() - t0 < 12000) {  // Reduced from 20s to 12s
                     const [result] = await chrome.scripting.executeScript({
                         target: { tabId: tab.id },
                         func: () => window.__billingResult || null,
@@ -378,9 +261,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                         });
                         break;
                     }
-                    await new Promise(r => setTimeout(r, 250));
+                    await new Promise(r => setTimeout(r, 200));  // Reduced from 250ms to 200ms for faster detection
                 }
-                if (!billingResp) throw new Error('Billing timeout: No result after 20s');
+                if (!billingResp) throw new Error('Billing timeout: No result after 12s');
                 sendResponse(billingResp);
             } catch (e) {
                 sendResponse({ ok:false, error: e?.message || String(e) });

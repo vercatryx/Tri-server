@@ -8,7 +8,7 @@
     const PROGRESS = (event, data = {}) => {
         try { chrome.runtime.sendMessage({ type: "NAV_PROGRESS", event, ...data }); } catch {}
     };
-    const LOG = (line, extra = {}) => PROGRESS("log", { line, ...extra });
+    const LOG = (line, extra = {}) => PROGRESS("log", { line: `\n${line}`, ...extra });
     const TS = () => new Date().toLocaleTimeString();
 
     const state = {

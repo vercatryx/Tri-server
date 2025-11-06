@@ -17,6 +17,9 @@
             --radius: 10px;
         }
         * { box-sizing: border-box; }
+        html, body {
+            overflow-x: hidden;
+        }
         body {
             margin: 0;
             font-family: system-ui, sans-serif;
@@ -27,23 +30,20 @@
             padding: 16px;
         }
         .wrap {
-            width: 100%;
-            max-width: 520px;
+            width: 360px;
+            max-width: 360px;
             display: flex;
             flex-direction: column;
             gap: 12px;
             height: 100vh;
+            overflow-y: auto;
+            overflow-x: hidden;
         }
         #screenManual {
             display: flex;
             flex-direction: column;
-            flex: 1;
-            min-height: 0;
         }
         .content-area {
-            flex: 1;
-            min-height: 0;
-            overflow-y: auto;
             display: flex;
             flex-direction: column;
             gap: 12px;
@@ -54,20 +54,23 @@
             border-radius: var(--radius);
             padding: 16px;
             width: 100%;
+            max-width: 100%;
             box-shadow: 0 8px 20px rgba(0,0,0,0.4);
         }
         h2 { margin: 0 0 10px 0; font-size: 18px; color: #e5e7eb; }
 
         /* Inputs section */
-        label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
-        input[type="date"], input[type="number"] {
+        label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+        input[type="date"], input[type="number"], input[type="email"], input[type="password"], input[type="text"] {
             background: #0b1222;
             color: var(--text);
             border: 1px solid var(--line);
             border-radius: var(--radius);
             padding: 8px;
+            max-width: 100%;
+            min-width: 0;
         }
-        .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+        .input-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; min-width: 0; }
 
         /* Buttons */
         button {
@@ -77,12 +80,17 @@
             border-radius: var(--radius);
             cursor: pointer;
             font-weight: 500;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         #btnGenAndUpload { background: var(--primary); color: #fff; }
         #enterBillingBtn { background: var(--success); color: #052e16; }
         #btnUploadPDF   { background: var(--warn); color: #1f1300; }
         #btnCreateUser  { background: #334155; color: #e5e7eb; border: 1px solid #243042; width: 100%; margin-bottom: 12px; }
-        .btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+        #btnUnitedUsLogin { background: #10b981; color: #052e16; width: 100%; margin-bottom: 12px; }
+        .btn-row { display: flex; flex-wrap: nowrap; gap: 8px; margin-bottom: 8px; min-width: 0; }
 
         /* Log bar and log section (matching auto tab) */
         .logbar {
@@ -151,20 +159,24 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
+            min-width: 0;
         }
         .identify .head {
             display: flex;
             align-items: center;
             gap: 8px;
+            min-width: 0;
         }
         .badge {
             font-size: 11px; padding: 2px 6px; border-radius: 999px;
             background: #1f2937; color: #cbd5e1; border: 1px solid #233044;
+            white-space: nowrap;
         }
         .identify input[type="search"] {
             flex: 1;
             background: #0a1120; border: 1px solid var(--line);
             color: var(--text); border-radius: 8px; padding: 6px 8px;
+            min-width: 0;
         }
         .identify .list {
             flex: 1; overflow: auto;
@@ -176,8 +188,8 @@
         }
         .identify .item:last-child { border-bottom: none; }
         .identify .item.sel { background: #0f1a33; }
-        .identify .btnRow { display: flex; gap: 8px; }
-        .identify .btnRow .btn { flex: 1; background: var(--success); color: #062a23; border: 1px solid #059669; }
+        .identify .btnRow { display: flex; gap: 8px; min-width: 0; }
+        .identify .btnRow .btn { flex: 1; background: var(--success); color: #062a23; border: 1px solid #059669; min-width: 0; }
 
         /* Screen toggling */
         .hidden { display: none !important; }
@@ -188,6 +200,7 @@
     <!-- SCREEN: Manual tools -->
     <div id="screenManual">
         <div class="content-area">
+            <button id="btnUnitedUsLogin">Login to UnitedUs</button>
             <button id="btnCreateUser">Create New User</button>
 
             <div class="manual-card">
@@ -232,6 +245,22 @@
                 <div class="btnRow">
                     <button id="btnLinkCurrent" class="btn">Connect selected to current tab</button>
                 </div>
+            </div>
+
+            <!-- UnitedUs Login Credentials -->
+            <div class="manual-card">
+                <h2>UnitedUs Login Credentials</h2>
+                <div class="input-grid">
+                    <label>
+                        Email
+                        <input id="uniteus_email" type="email" placeholder="you@example.com" value="orit@dietfantasy.com">
+                    </label>
+                    <label>
+                        Password
+                        <input id="uniteus_password" type="text" placeholder="password" value="Diet1234fantasy">
+                    </label>
+                </div>
+                <div id="uniteus_status" style="font-size: 12px; color: var(--muted); margin-top: 8px;"></div>
             </div>
         </div>
 

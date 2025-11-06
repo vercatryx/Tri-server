@@ -1,6 +1,10 @@
 (function attachAttestationFlow() {
     if (window.attestationFlow) return;
 
+    // Version check - ensure latest code is loaded
+    console.log('[attestationFlow] Loading v2.1 - with date adjustment and duplicate check');
+    window.__ATTESTATION_FLOW_VERSION__ = '2.1';
+
     function toMDY(iso) {
         // Accepts YYYY-MM-DD or already-in-M/D/YYYY, returns MM/DD/YYYY or null
         if (!iso || typeof iso !== 'string') return null;
@@ -118,7 +122,141 @@
         });
     }
 
+    // Helper to parse money string
+    const parseMoney = (str) => {
+        if (!str) return null;
+        const num = Number(String(str).replace(/[^0-9.]/g, ''));
+        return Number.isFinite(num) ? num : null;
+    };
+
+    // Helper to parse MDY date string
+    const parseMDY = (s) => {
+        const m = String(s).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (!m) return null;
+        const mm = +m[1], dd = +m[2], yyyy = +m[3];
+        if (mm < 1 || mm > 12) return null;
+        const last = new Date(yyyy, mm, 0).getDate();
+        if (dd < 1 || dd > last) return null;
+        return new Date(yyyy, mm - 1, dd);
+    };
+
+    const fmtMDY = (d) => {
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const yy = d.getFullYear();
+        return `${mm}/${dd}/${yy}`;
+    };
+
+    const clampRange = (reqStart, reqEnd, authStart, authEnd) => {
+        const start = new Date(Math.max(reqStart.getTime(), authStart.getTime()));
+        const end = new Date(Math.min(reqEnd.getTime(), authEnd.getTime()));
+        if (end.getTime() < start.getTime()) return null;
+        return { start, end };
+    };
+
+    const inclusiveDays = (start, end) => Math.floor((end - start) / 86400000) + 1;
+    const addDays = (date, n) => { const d = new Date(date.getTime()); d.setDate(d.getDate() + n); return d; };
+
+    // Function to read authorized dates from the page (with retry logic)
+    async function readAuthorizedInfo(maxRetries = 15, delayMs = 1000) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                // Method 1: Try the xpath to the detail table
+                const tableXPath = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]';
+                let detailTable = document.evaluate(tableXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+
+                // Method 2: Try finding the table by ID
+                if (!detailTable) {
+                    detailTable = document.getElementById('basic-table')?.closest('.detail-label-content');
+                }
+
+                // Method 3: Search for the table by looking for specific text
+                if (!detailTable) {
+                    const tables = Array.from(document.querySelectorAll('.basic-table.basic-table--detail-page'));
+                    detailTable = tables.find(t => t.textContent.includes('Authorization status'));
+                }
+
+                if (!detailTable) {
+                    console.log(`[attestationFlow] Attempt ${attempt}/${maxRetries}: Detail table not found yet`);
+                    if (attempt < maxRetries) {
+                        await new Promise(r => setTimeout(r, delayMs));
+                        continue;
+                    }
+                    return { ok: false, error: 'Detail table not found after retries' };
+                }
+
+                // Extract authorized amount
+                let authorizedAmount = null;
+                const authAmtEl = detailTable.querySelector('#basic-table-authorized-amount-value .dollar-amount, #basic-table-authorized-amount-value');
+                if (authAmtEl) {
+                    authorizedAmount = parseMoney(authAmtEl.textContent);
+                }
+
+                // Extract authorized date range
+                let authStart = null, authEnd = null;
+                const authDatesEl = detailTable.querySelector('#basic-table-authorized-service-delivery-date-s-value');
+                if (authDatesEl?.textContent) {
+                    const dateText = authDatesEl.textContent.trim();
+                    const parts = dateText.split(/\s*-\s*/);
+                    if (parts.length === 2) {
+                        authStart = parseMDY(parts[0].trim());
+                        authEnd = parseMDY(parts[1].trim());
+                    } else if (parts.length === 1) {
+                        authStart = parseMDY(parts[0].trim());
+                        authEnd = authStart;
+                    }
+                }
+
+                // Calculate remaining amount
+                let remaining = authorizedAmount;
+                if (authorizedAmount) {
+                    const container = document.querySelector('main .space-y-5');
+                    const xpathContainerPath = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]';
+                    const xpathContainer = document.evaluate(xpathContainerPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                    const searchRoot = container || xpathContainer;
+
+                    if (searchRoot) {
+                        const cardsContainer = searchRoot.querySelector('.space-y-5') || searchRoot;
+                        const amountElements = cardsContainer.querySelectorAll('[data-test-element="unit-amount-value"]');
+                        let totalBilled = 0;
+                        amountElements.forEach(el => {
+                            const amt = parseMoney(el.textContent);
+                            if (amt) totalBilled += amt;
+                        });
+                        remaining = authorizedAmount - totalBilled;
+                    }
+                }
+
+                // Check if we have valid data
+                if (authStart && authEnd && authorizedAmount !== null && remaining !== null) {
+                    console.log('[attestationFlow] Successfully read authorized info:', {
+                        authStart: fmtMDY(authStart),
+                        authEnd: fmtMDY(authEnd),
+                        authorizedAmount,
+                        remaining
+                    });
+                    return { ok: true, authStart, authEnd, authorizedAmount, remaining };
+                }
+
+                console.log(`[attestationFlow] Attempt ${attempt}/${maxRetries}: Incomplete data`);
+                if (attempt < maxRetries) {
+                    await new Promise(r => setTimeout(r, delayMs));
+                }
+            } catch (e) {
+                console.warn(`[attestationFlow] Attempt ${attempt}/${maxRetries} error:`, e);
+                if (attempt < maxRetries) {
+                    await new Promise(r => setTimeout(r, delayMs));
+                }
+            }
+        }
+        return { ok: false, error: 'Could not read authorized info after retries' };
+    }
+
     async function generateAndUpload({ backendUrl, onProgress } = {}) {
+        console.log('[attestationFlow] ========================================');
+        console.log('[attestationFlow] generateAndUpload CALLED - v2.1');
+        console.log('[attestationFlow] ========================================');
+
         if (!backendUrl) return { ok: false, step: "config", error: "Upload failed: Missing backend URL" };
         if (!window.personInfo?.getPerson) return { ok: false, step: "read", error: "Upload failed: Person info module not loaded" };
         if (!window.pdfUploader?.attachBytes) return { ok: false, step: "upload", error: "Upload failed: PDF uploader module not loaded" };
@@ -144,17 +282,87 @@
         /* ========= Build ISO dates for BACKEND (YYYY-MM-DD) ========= */
         const isoOk = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-        // Delivery date comes from attestation (manual-mode parity), else today
-        const deliveryISO = isoOk(chosenDate) ? chosenDate : todayISO();
-
-        // Service period MUST be present — do NOT collapse to delivery
+        // Service period MUST be present
         if (!isoOk(startISO) || !isoOk(endISO)) {
             const err = `Missing/invalid service period. startISO="${startISO}", endISO="${endISO}"`;
             emit(onProgress, "gen_upload:failed", { error: err });
             return { ok: false, step: "params", error: err };
         }
-        const startISOFinal = startISO;
-        const endISOFinal = endISO;
+
+        // Convert ISO to Date objects for adjustment
+        const reqStart = new Date(startISO);
+        const reqEnd = new Date(endISO);
+
+        // Read authorized dates from the page (with retry logic)
+        console.log('[attestationFlow] Reading authorized info from page...');
+        emit(onProgress, "auth_info:reading");
+        const authInfo = await readAuthorizedInfo(15, 1000);
+
+        let adjustedStart = reqStart;
+        let adjustedEnd = reqEnd;
+
+        if (authInfo.ok) {
+            console.log('[attestationFlow] Adjusting dates based on authorized info');
+            const { authStart, authEnd, remaining } = authInfo;
+
+            // Intersect with authorized range
+            const overlap = clampRange(reqStart, reqEnd, authStart, authEnd);
+            if (overlap) {
+                adjustedStart = overlap.start;
+                adjustedEnd = overlap.end;
+                console.log('[attestationFlow] Dates adjusted to authorized range:',
+                    fmtMDY(adjustedStart), '→', fmtMDY(adjustedEnd));
+            } else {
+                const err = `No overlap between requested (${toISO(fmtMDY(reqStart))} - ${toISO(fmtMDY(reqEnd))}) and authorized (${toISO(fmtMDY(authStart))} - ${toISO(fmtMDY(authEnd))}) dates`;
+                console.error('[attestationFlow]', err);
+                emit(onProgress, "gen_upload:failed", { error: err });
+                return { ok: false, step: "date_adjustment", error: err };
+            }
+
+            // Note: We don't adjust by remaining amount for attestations like we do for billing
+            // Attestations are just documents, billing is where we care about remaining funds
+        } else {
+            console.warn('[attestationFlow] Could not read authorized info, using requested dates as-is:', authInfo.error);
+            // Continue with requested dates even if we couldn't read auth info
+        }
+
+        // Convert adjusted dates back to ISO
+        const startISOFinal = adjustedStart.toISOString().slice(0, 10);
+        const endISOFinal = adjustedEnd.toISOString().slice(0, 10);
+
+        console.log('[attestationFlow] Final dates for attestation:', startISOFinal, '→', endISOFinal);
+
+        // Delivery date comes from attestation (manual-mode parity), else today
+        let deliveryISO = isoOk(chosenDate) ? chosenDate : todayISO();
+
+        // IMPORTANT: Delivery date must be within the service period
+        // If it's before start date OR after end date, adjust it to start date
+        const deliveryDate = new Date(deliveryISO);
+        deliveryDate.setHours(0, 0, 0, 0); // Normalize to start of day for comparison
+        const compareStart = new Date(adjustedStart);
+        compareStart.setHours(0, 0, 0, 0); // Normalize to start of day for comparison
+        const compareEnd = new Date(adjustedEnd);
+        compareEnd.setHours(0, 0, 0, 0); // Normalize to start of day for comparison
+
+        console.log('[attestationFlow] Validating delivery date:', {
+            deliveryISO,
+            startISOFinal,
+            endISOFinal,
+            isBefore: deliveryDate < compareStart,
+            isAfter: deliveryDate > compareEnd
+        });
+
+        if (deliveryDate < compareStart) {
+            console.warn('[attestationFlow] ⚠️ Delivery date', deliveryISO, 'is BEFORE start date', startISOFinal);
+            deliveryISO = startISOFinal;
+            console.log('[attestationFlow] ✓ Adjusted delivery date to start date:', deliveryISO);
+        } else if (deliveryDate > compareEnd) {
+            console.warn('[attestationFlow] ⚠️ Delivery date', deliveryISO, 'is AFTER end date', endISOFinal);
+            deliveryISO = startISOFinal;
+            console.log('[attestationFlow] ✓ Adjusted delivery date to start date:', deliveryISO);
+        } else {
+            console.log('[attestationFlow] ✓ Delivery date is valid (within service period)');
+        }
 
         // Attestation date explicit or today
         const attestISOFinal = isoOk(attestationISO) ? attestationISO : todayISO();
@@ -164,6 +372,71 @@
         const startMDY      = toMDY(startISOFinal);
         const endMDY        = toMDY(endISOFinal);
         // const attestationMDY = toMDY(attestISOFinal); // only if you want it in the filename/logs
+
+        /* ========= EARLY DUPLICATE CHECK - before generating PDF ========= */
+        console.log('[attestationFlow] ========================================');
+        console.log('[attestationFlow] EARLY DUPLICATE CHECK - BEFORE GENERATING PDF');
+        console.log('[attestationFlow] ========================================');
+
+        // Calculate expected amount for duplicate check
+        const days = inclusiveDays(adjustedStart, adjustedEnd);
+        // Try to get rate from localStorage (same as panel.js)
+        let ratePerDay = 48; // default
+        try {
+            const manualParams = JSON.parse(localStorage.getItem('DF_MANUAL_PARAMS') || '{}');
+            const rate = Number(manualParams.ratePerDay);
+            if (rate && rate > 0) ratePerDay = rate;
+        } catch (e) {
+            console.warn('[attestationFlow] Could not read rate from localStorage:', e);
+        }
+        const expectedAmount = ratePerDay * days;
+
+        console.log('[attestationFlow] Checking for duplicates:', {
+            dates: `${startMDY} → ${endMDY}`,
+            days,
+            ratePerDay,
+            expectedAmount
+        });
+
+        emit(onProgress, "duplicate_check:start");
+
+        let isDuplicate = false;
+        try {
+            if (window.invoiceScanner?.findExisting) {
+                console.log('[attestationFlow] Using invoiceScanner for duplicate check');
+                const out = window.invoiceScanner.findExisting({
+                    start: adjustedStart,
+                    end: adjustedEnd,
+                    amount: expectedAmount,
+                    requireTitle: null
+                });
+                isDuplicate = !!out?.exists;
+                console.log('[attestationFlow] invoiceScanner result:', out);
+                if (isDuplicate) {
+                    console.warn('[attestationFlow] ⚠️ DUPLICATE FOUND:', out);
+                    emit(onProgress, "duplicate_check:found", { matches: out.matches });
+                } else {
+                    console.log('[attestationFlow] ✓ No duplicate found');
+                }
+            } else {
+                console.log('[attestationFlow] invoiceScanner not available, skipping duplicate check');
+            }
+        } catch (e) {
+            console.warn('[attestationFlow] Duplicate check error:', e);
+        }
+
+        if (isDuplicate) {
+            const err = `Duplicate invoice detected for ${startMDY} → ${endMDY}, $${expectedAmount}`;
+            console.warn('[attestationFlow]', err);
+            emit(onProgress, "gen_upload:failed", { error: err });
+            try {
+                chrome.runtime?.sendMessage?.({ type: 'DF_BILLING_DUPLICATE_FOUND' });
+            } catch {}
+            return { ok: false, step: "duplicate_check", error: err, duplicate: true };
+        }
+
+        console.log('[attestationFlow] No duplicate found, proceeding with generation');
+        emit(onProgress, "duplicate_check:passed");
 
         /* ========= Payload to backend: SNAKE_CASE + ISO ========= */
         const payload = {

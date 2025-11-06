@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "DF Automation Panel",
-  "version": "5.1.0",
+  "name": "DF Billing",
+  "version": "5.1.7",
   "background": { "service_worker": "background/bridge.js" },
-  "description": "Auto Billing.",
+  "description": "Diet Fantasy Auto Billing.",
   "permissions": ["storage", "tabs", "activeTab", "scripting", "sidePanel"],
   "host_permissions": [
     "https://dietfantasy-nkw6.vercel.app/*",
-    "https://app.uniteus.io/*"
+    "https://app.uniteus.io/*",
+    "https://app.auth.uniteus.io/*"
   ],
 
   "icons": {

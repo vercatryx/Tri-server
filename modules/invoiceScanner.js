@@ -36,6 +36,8 @@
         const cents = centsFrom(amountText);
         const datesText = norm(rangeEl?.textContent);
 
+        console.log(`[invoiceScanner.parseCard] Card ${idx}: amountText="${amountText}", cents=${cents}, datesText="${datesText}"`);
+
         let start = null, end = null;
         if (datesText) {
             const parts = datesText.split(/\s*-\s*/);
@@ -47,6 +49,9 @@
                 end   = start;
             }
         }
+
+        const fmtDate = (d) => d ? `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}` : 'null';
+        console.log(`[invoiceScanner.parseCard] Card ${idx}: Parsed dates: start=${fmtDate(start)}, end=${fmtDate(end)}`);
 
         return {
             idx,
@@ -65,6 +70,14 @@
 
     function scanCards() {
         const cards = Array.from(document.querySelectorAll(".fee-schedule-provided-service-card"));
+        console.log('[invoiceScanner.scanCards] Found', cards.length, 'cards with selector .fee-schedule-provided-service-card');
+
+        // Log visibility status
+        cards.forEach((card, i) => {
+            const isVisible = !!(card.offsetParent !== null || (card.getClientRects?.().length || 0) > 0);
+            console.log(`[invoiceScanner.scanCards] Card ${i+1}: visible=${isVisible}`);
+        });
+
         return cards.map(parseCard);
     }
 
@@ -73,28 +86,54 @@
      * @returns {{exists:boolean, matches:Array, rows:Array}}
      */
     function findExisting(opts) {
+        console.log('[invoiceScanner.findExisting] Called with:', opts);
         const rows = scanCards();
         const requireTitle = opts?.requireTitle || null;
 
         const tStart = dFrom(opts?.start);
         const tEnd = opts?.end == null ? tStart : dFrom(opts?.end);
+        const fmtDate = (d) => d ? `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}` : 'null';
+
+        console.log('[invoiceScanner.findExisting] Target dates:', fmtDate(tStart), '→', fmtDate(tEnd));
+
         if (!tStart || !tEnd) {
+            console.warn('[invoiceScanner.findExisting] Bad dates');
             return { exists: false, matches: [], rows, error: "Bad dates" };
         }
         const targetCents = centsFrom(opts?.amount);
+        console.log('[invoiceScanner.findExisting] Target amount:', opts?.amount, '→', targetCents, 'cents');
+
         if (!Number.isFinite(targetCents)) {
+            console.warn('[invoiceScanner.findExisting] Bad amount');
             return { exists: false, matches: [], rows, error: "Bad amount" };
         }
 
         const filtered = rows.filter(r => (requireTitle ? r.title === requireTitle : true));
+        console.log('[invoiceScanner.findExisting] Filtered', filtered.length, 'cards (title filter:', requireTitle || 'none', ')');
 
-        const matches = filtered.filter(r =>
-            Number.isFinite(r.cents) &&
-            r.start && r.end &&
-            r.cents === targetCents &&
-            sameDay(r.start, tStart) &&
-            sameDay(r.end, tEnd)
-        );
+        const matches = filtered.filter(r => {
+            const amtMatch = Number.isFinite(r.cents) && r.cents === targetCents;
+            const startMatch = r.start && sameDay(r.start, tStart);
+            const endMatch = r.end && sameDay(r.end, tEnd);
+
+            console.log(`[invoiceScanner.findExisting] Card ${r.idx}: amt=${r.cents}(${amtMatch}), start=${fmtDate(r.start)}(${startMatch}), end=${fmtDate(r.end)}(${endMatch})`);
+
+            return Number.isFinite(r.cents) &&
+                r.start && r.end &&
+                r.cents === targetCents &&
+                sameDay(r.start, tStart) &&
+                sameDay(r.end, tEnd);
+        });
+
+        console.log('[invoiceScanner.findExisting] Found', matches.length, 'matches');
+        if (matches.length > 0) {
+            console.log('[invoiceScanner.findExisting] Match details:', matches.map(m => ({
+                amount: m.amountText,
+                dates: m.datesText,
+                status: m.status,
+                invoiceNo: m.invoiceNo
+            })));
+        }
 
         return { exists: matches.length > 0, matches, rows };
     }
