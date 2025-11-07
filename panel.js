@@ -21,6 +21,7 @@
     const listEl      = document.getElementById("list");
     const logEl       = document.getElementById("log");
     const btnClearLog = document.getElementById("btnClearLog");
+    const btnResetSkips = document.getElementById("btnResetSkips");
     const btnErrors   = document.getElementById("btnErrors");
     const btnRefresh  = document.getElementById("btnRefresh");
     const btnStart    = document.getElementById("btnStart");
@@ -644,6 +645,14 @@
 
     btnRefresh.onclick  = ()=>fetchUsers().catch(e=>log("Refresh failed: "+e));
     btnClearLog.onclick = ()=>{ localStorage.removeItem(LOG_KEY); logEl.textContent=`[${stamp()}] (logs cleared)\n`; localStorage.setItem(LOG_KEY,logEl.textContent); };
+    btnResetSkips.onclick = ()=>{
+        // Clear all skips
+        users.forEach(u => u.skip = false);
+        localStorage.removeItem(SKIPS_KEY);
+        buildFiltered();
+        renderList();
+        log("All skips cleared");
+    };
     btnErrors.onclick   = ()=>{ errorsOnly = !errorsOnly; localStorage.setItem(ERRORS_KEY, errorsOnly ? "1" : "0"); buildFiltered(); renderList(); };
     btnClose.onclick    = async()=>{ const[tab]=await chrome.tabs.query({active:true,currentWindow:true}); if(tab?.id) await chrome.sidePanel.setOptions({tabId:tab.id,enabled:false}); };
 
