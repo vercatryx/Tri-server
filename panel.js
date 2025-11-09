@@ -22,6 +22,7 @@
     const logEl       = document.getElementById("log");
     const btnClearLog = document.getElementById("btnClearLog");
     const btnResetSkips = document.getElementById("btnResetSkips");
+    const btnSomeMode = document.getElementById("btnSomeMode");
     const btnErrors   = document.getElementById("btnErrors");
     const btnRefresh  = document.getElementById("btnRefresh");
     const btnStart    = document.getElementById("btnStart");
@@ -41,11 +42,14 @@
     // ----- State -----
     const MODE_KEY="df_panel_mode", LOG_KEY="df_panel_log", SKIPS_KEY="df_panel_skips",
         OPTS_KEY="df_panel_opts", SEARCH_KEY="df_panel_search", ERRORS_KEY="df_panel_errors_only",
-        MANUAL_PARAMS_KEY="df_manual_params", UNITEUS_STORE_KEY="df_uniteus_creds";
+        MANUAL_PARAMS_KEY="df_manual_params", UNITEUS_STORE_KEY="df_uniteus_creds",
+        SOME_MODE_KEY="df_panel_some_mode", SELECTED_USERS_KEY="df_panel_selected_users";
     let mode=localStorage.getItem(MODE_KEY)||"auto";
     let users=[], filtered=[], perUserState=new Map();
     let q = localStorage.getItem(SEARCH_KEY) || "";
     let errorsOnly = localStorage.getItem(ERRORS_KEY) === "1";
+    let someMode = localStorage.getItem(SOME_MODE_KEY) === "1";
+    let selectedUsers = new Set(); // Set of user IDs selected in "Some" mode
 
     // Auto-run flags
     let isRunning=false, isPaused=false, stopRequested=false, lockedTabId=null, duplicateFoundInBilling = false;
@@ -100,6 +104,11 @@
         try { const s = JSON.parse(localStorage.getItem(SKIPS_KEY)||"{}"); users.forEach(u => u.skip = !!s[u.id]); } catch {}
     }
 
+    const saveSelectedUsers=()=>{ localStorage.setItem(SELECTED_USERS_KEY, JSON.stringify(Array.from(selectedUsers))); };
+    function restoreSelectedUsers() {
+        try { const arr = JSON.parse(localStorage.getItem(SELECTED_USERS_KEY)||"[]"); selectedUsers = new Set(arr); } catch {}
+    }
+
     // Read rate per day from manual mode settings (shared app setting)
     const getRatePerDay = () => {
         try {
@@ -145,6 +154,14 @@
         filtered = all.filter(u => matches(u, q) && (!errorsOnly || isError(u)));
     }
 
+    function updateStartButtonText() {
+        if (someMode && selectedUsers.size > 0) {
+            btnStart.textContent = `Start (${selectedUsers.size})`;
+        } else {
+            btnStart.textContent = "Start";
+        }
+    }
+
     function renderList(){
         listEl.innerHTML="";
         const frag=document.createDocumentFragment();
@@ -152,7 +169,12 @@
         filtered.forEach((u,idx)=>{
             const st=perUserState.get(u.id)||{status:u.invalid?"bad":"pending"};
             const li=document.createElement("div"); li.className="row";
+
+            // In Some mode, add checkbox before the number
+            const checkboxHtml = someMode ? `<input type="checkbox" class="user-checkbox" data-user-id="${u.id}" ${selectedUsers.has(u.id) ? 'checked' : ''} style="margin-right: 8px;">` : '';
+
             li.innerHTML=`
+        ${checkboxHtml}
         <div class="num">${idx+1}</div>
         ${statusIconHtml(st)}
         <div class="name" title="${u.name||""}">${(u.name||"").toUpperCase()}</div>
@@ -160,15 +182,50 @@
       `;
             const sub=subline(st); if(sub){ const s=document.createElement("div"); s.className="sub"; s.textContent=sub; li.appendChild(s); }
 
+            // Handle checkbox clicks in Some mode
+            if (someMode) {
+                const checkbox = li.querySelector('.user-checkbox');
+                if (checkbox) {
+                    checkbox.addEventListener('click', (e) => {
+                        e.stopPropagation(); // Prevent row click
+                        if (checkbox.checked) {
+                            selectedUsers.add(u.id);
+                        } else {
+                            selectedUsers.delete(u.id);
+                        }
+                        saveSelectedUsers();
+                        updateStartButtonText();
+                    });
+                }
+            }
+
             li.addEventListener("click", async (e) => {
                 const url = UNITE_URL(u.caseId, u.clientId);
                 const statusEl = e.target.closest('.status');
 
-                // colored icon → SAME TAB (never require lock for manual open)
+                // colored icon → SAME TAB (works in both normal and Some mode)
                 if (statusEl && !u.invalid) {
                     await sendBg({ type: "DF_NAVIGATE", url, readyXPath: READY_XP }, { useLock: false });
                     return;
                 }
+
+                // In Some mode, clicking anywhere (except status icon) toggles the checkbox selection
+                if (someMode) {
+                    const checkbox = li.querySelector('.user-checkbox');
+                    if (checkbox && e.target !== checkbox) {
+                        checkbox.checked = !checkbox.checked;
+                        if (checkbox.checked) {
+                            selectedUsers.add(u.id);
+                        } else {
+                            selectedUsers.delete(u.id);
+                        }
+                        saveSelectedUsers();
+                        updateStartButtonText();
+                    }
+                    return;
+                }
+
+                // Normal mode behavior (not Some mode)
                 // Cmd/Ctrl anywhere → new tab
                 if (e.metaKey || e.ctrlKey) {
                     if (!u.invalid) chrome.tabs.create({ url });
@@ -186,6 +243,7 @@
         listEl.appendChild(frag);
         countFoot.textContent = `${filtered.length} / ${users.length} users`;
         btnErrors.classList.toggle("active", errorsOnly);
+        updateStartButtonText();
     }
 
     async function fetchUsers(){
@@ -193,6 +251,12 @@
         const r=await fetch(API_URL,{credentials:"omit"});
         if(!r.ok) throw new Error(`HTTP ${r.status}`);
         const data=await r.json();
+
+        // Log first user from API to see structure
+        if (Array.isArray(data) && data.length > 0) {
+            log(`Sample user from API (first user):`, data[0]);
+            log(`First user ID fields: id=${data[0].id}, _id=${data[0]._id}`);
+        }
 
         users = (Array.isArray(data) ? data : []).map(u => {
             let reason = null;
@@ -326,6 +390,10 @@
         if (u.invalid) { mark(u, "bad", u.invalidReason || "Invalid"); return; }
         if (u.skip)   { mark(u, "warn", "Skipped by user"); return; }
 
+        // Log the entire user object to see what fields are available
+        log(`Processing user - Full object:`, u);
+        log(`User ID check: u.id = ${u.id}, u._id = ${u._id}`);
+
         const url = UNITE_URL(u.caseId, u.clientId);
         log(`Navigating → ${u.name}`, { url });
 
@@ -341,14 +409,17 @@
         // --- Upload attestation (if signature) ---
         if (opts.attemptUpload) {
             if (u.hasSignature) {
-                log(`Generating & uploading attestation…`, { user:u.name });
-                const resp = await sendBg({
+                log(`Generating & uploading attestation…`, { user:u.name, userId:u.id });
+                const uploadMsg = {
                     type: "GENERATE_AND_UPLOAD",
                     chosenDate: opts.dates.delivery,
                     startISO:   opts.dates.start,
                     endISO:     opts.dates.end,
+                    userId:     u.id,
                     backendUrl: "https://dietfantasy-nkw6.vercel.app/api/ext/attestation"
-                });
+                };
+                log(`GENERATE_AND_UPLOAD message being sent:`, uploadMsg);
+                const resp = await sendBg(uploadMsg);
                 if (!resp?.ok) {
                     anyBad = true;
                     const reason = resp?.error || resp?.body || resp?.contentType || resp?.code || "unknown";
@@ -524,7 +595,12 @@
         const ratePerDay = getRatePerDay();
         log(`Auto run started`, { upload:opts.attemptUpload, billing:opts.attemptBilling, dates:opts.dates, ratePerDay });
 
-        const queue = filtered.slice();
+        // In Some mode, only process selected users
+        let queue = filtered.slice();
+        if (someMode) {
+            queue = queue.filter(u => selectedUsers.has(u.id));
+            log(`Some mode: processing ${queue.length} selected users out of ${filtered.length} total`);
+        }
 
         for (let i=0; i<queue.length; i++) {
             if (stopRequested) { log(`Stopped by user.`); break; }
@@ -653,6 +729,23 @@
         renderList();
         log("All skips cleared");
     };
+    btnSomeMode.onclick = ()=>{
+        someMode = !someMode;
+        localStorage.setItem(SOME_MODE_KEY, someMode ? "1" : "0");
+        btnSomeMode.classList.toggle('active', someMode);
+
+        // When leaving Some mode, clear all selections
+        if (!someMode) {
+            selectedUsers.clear();
+            localStorage.removeItem(SELECTED_USERS_KEY);
+            log("Some mode disabled - selections cleared");
+        } else {
+            log("Some mode enabled - select users to process");
+        }
+
+        renderList();
+        updateStartButtonText();
+    };
     btnErrors.onclick   = ()=>{ errorsOnly = !errorsOnly; localStorage.setItem(ERRORS_KEY, errorsOnly ? "1" : "0"); buildFiltered(); renderList(); };
     btnClose.onclick    = async()=>{ const[tab]=await chrome.tabs.query({active:true,currentWindow:true}); if(tab?.id) await chrome.sidePanel.setOptions({tabId:tab.id,enabled:false}); };
 
@@ -690,6 +783,9 @@
     // ----- Boot -----
     (async()=>{
         reflectTabs(); restoreLog(); reflectOptsToUI(loadOpts());
+        restoreSelectedUsers();
+        btnSomeMode.classList.toggle('active', someMode);
+        btnErrors.classList.toggle('active', errorsOnly);
         try{ await fetchUsers(); }catch(e){ listEl.innerHTML=`<div style='padding:10px 12px;'>Load failed: ${e}`; }
         setRunningUI(false);
     })();

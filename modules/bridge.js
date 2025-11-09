@@ -73,6 +73,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "GENERATE_AND_UPLOAD") {
         (async () => {
             try {
+                console.log('[bridge.js] GENERATE_AND_UPLOAD received:', msg);
+                console.log('[bridge.js] msg.userId =', msg.userId);
+
                 const tab = await getActiveTab();
                 await ensureInjected(tab.id);
 
@@ -95,6 +98,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                 const startISO      = toISO(msg.startISO)       || null;
                 const endISO        = toISO(msg.endISO)         || null;
                 const backendUrl    = msg.backendUrl;
+                const userId        = msg.userId || null;
+
+                console.log('[bridge.js] Extracted userId:', userId, 'from msg.userId:', msg.userId);
 
                 // Make params available in page (content script reads these)
                 await chrome.scripting.executeScript({
@@ -104,7 +110,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                         chosenDate: chosenISO,        // delivery day
                         attestationISO: attestISO,    // explicit attestation
                         startISO,                     // service period start
-                        endISO                        // service period end
+                        endISO,                       // service period end
+                        userId                        // user ID from database
                     }],
                 });
 
@@ -117,17 +124,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                 // Call generator in the page; return its result
                 const [res] = await chrome.scripting.executeScript({
                     target: { tabId: tab.id },
-                    func: async (url) => {
+                    func: async (url, uid) => {
                         try {
                             if (!window.attestationFlow?.generateAndUpload) {
                                 return { ok: false, step: "content", error: "attestationFlow not loaded" };
                             }
-                            return await window.attestationFlow.generateAndUpload({ backendUrl: url });
+                            return await window.attestationFlow.generateAndUpload({ backendUrl: url, userId: uid });
                         } catch (e) {
                             return { ok: false, step: "content", error: (e && e.message) || String(e) };
                         }
                     },
-                    args: [backendUrl],
+                    args: [backendUrl, userId],
                 });
 
                 sendResponse(res?.result ?? res ?? { ok: false, error: "No result" });

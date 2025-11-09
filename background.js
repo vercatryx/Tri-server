@@ -535,8 +535,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 msg.type === "UPLOAD_PDF_OPEN" ||
                 msg.type === "ENTER_BILLING" ||
                 msg.type === "PING") {
+                if (msg.type === "GENERATE_AND_UPLOAD") {
+                    console.log('[background.js] GENERATE_AND_UPLOAD received:', msg);
+                    console.log('[background.js] msg.userId =', msg.userId);
+                }
                 const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
                 await ensureInjected(tabId);
+                if (msg.type === "GENERATE_AND_UPLOAD") {
+                    console.log('[background.js] Forwarding to tab', tabId, ':', msg);
+                }
                 const resp = await chrome.tabs.sendMessage(tabId, msg);
                 sendResponse(resp || { ok: true });
                 return;

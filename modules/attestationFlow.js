@@ -252,10 +252,11 @@
         return { ok: false, error: 'Could not read authorized info after retries' };
     }
 
-    async function generateAndUpload({ backendUrl, onProgress } = {}) {
+    async function generateAndUpload({ backendUrl, userId, onProgress } = {}) {
         console.log('[attestationFlow] ========================================');
         console.log('[attestationFlow] generateAndUpload CALLED - v2.1');
         console.log('[attestationFlow] ========================================');
+        console.log('[attestationFlow] userId:', userId);
 
         if (!backendUrl) return { ok: false, step: "config", error: "Upload failed: Missing backend URL" };
         if (!window.personInfo?.getPerson) return { ok: false, step: "read", error: "Upload failed: Person info module not loaded" };
@@ -447,7 +448,9 @@
             startDate: startISOFinal,      // ⬅️ back to camelCase
             endDate: endISOFinal,          // ⬅️ back to camelCase
             attestationDate: attestISOFinal, // ⬅️ back to camelCase
+            userId: userId || null,        // ⬅️ Include userId if available
         };
+        console.log('[attestationFlow] Final payload with userId:', payload);
         emit(onProgress, "payload:built", { payload });
 
         const resp = await postViaProxy(backendUrl, payload, onProgress);

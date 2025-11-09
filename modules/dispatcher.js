@@ -52,12 +52,13 @@
     }
 
     // ----- Full attestation flow (generate + upload) -----
-    async function generateAndUpload({ backendUrl, chosenDate }) {
+    async function generateAndUpload({ backendUrl, chosenDate, userId }) {
         try {
+            log('generateAndUpload called with userId:', userId);
             const flow = window.attestationFlow || window.attestation || window.attest;
             const run = pick(flow, ['generateAndUpload', 'run', 'start']);
             if (!run) return err('attestationFlow module not loaded.');
-            const res = await run({ backendUrl, chosenDate });
+            const res = await run({ backendUrl, chosenDate, userId });
             return res?.ok ? res : ok(res || {});
         } catch (e) { return err(e); }
     }
@@ -118,9 +119,11 @@
 
                 // Full flow
                 if (msg.type === 'GENERATE_AND_UPLOAD') {
-                    const { backendUrl, chosenDate } = msg;
+                    log('GENERATE_AND_UPLOAD received in dispatcher:', msg);
+                    const { backendUrl, chosenDate, userId } = msg;
+                    log('Extracted from msg - userId:', userId);
                     if (!backendUrl) { sendResponse(err('backendUrl is required.')); return; }
-                    sendResponse(await generateAndUpload({ backendUrl, chosenDate }));
+                    sendResponse(await generateAndUpload({ backendUrl, chosenDate, userId }));
                     return;
                 }
 
