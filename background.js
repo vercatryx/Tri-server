@@ -249,7 +249,8 @@ async function runVerifyInPage(tabId, expect) {
             const cards = Array.from(document.querySelectorAll('.fee-schedule-provided-service-card'));
             console.log('[🔍 runVerifyInPage] Found', cards.length, 'invoice cards on page');
 
-            for (const card of cards) {
+            for (let i = 0; i < cards.length; i++) {
+                const card = cards[i];
                 const amtEl = card.querySelector('[data-test-element="unit-amount-value"]');
                 const rngEl = card.querySelector('[data-test-element="service-dates-value"], [data-test-element="service-start-date-value"]');
 
@@ -265,6 +266,20 @@ async function runVerifyInPage(tabId, expect) {
                     s && s.setHours(0,0,0,0);
                     e && e.setHours(0,0,0,0);
                 }
+
+                console.log(`[🔍 runVerifyInPage] Card ${i+1}:`, {
+                    txtAmt,
+                    txtRange,
+                    cardCents,
+                    wantCents,
+                    centsMatch: cardCents === wantCents,
+                    startMatch: s && start && sameDay(s, start),
+                    endMatch: e && end && sameDay(e, end),
+                    cardStart: s,
+                    wantStart: start,
+                    cardEnd: e,
+                    wantEnd: end
+                });
 
                 const match = Number.isFinite(cardCents) && s && e &&
                     cardCents === wantCents &&
@@ -400,6 +415,7 @@ async function precheckDuplicate(tabId, expect) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
         try {
+            console.log('[background.js] Message received:', msg.type);
             if (!msg || !msg.type) { sendResponse({ ok:false, error:"Missing message type" }); return; }
 
             // --- Lock control ---
@@ -498,13 +514,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
             // --- Execute arbitrary script in page ---
             if (msg.type === "DF_EXEC_SCRIPT") {
+                console.log('[background.js] DF_EXEC_SCRIPT received');
                 const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
-                await chrome.scripting.executeScript({
+                console.log('[background.js] Executing script on tab', tabId);
+                const results = await chrome.scripting.executeScript({
                     target: { tabId },
-                    func: (code) => { eval(code); },
+                    func: (code) => { return eval(code); },
                     args: [msg.code]
                 });
-                sendResponse({ ok: true });
+                console.log('[background.js] Script results:', results);
+                sendResponse({ ok: true, result: results?.[0]?.result });
                 return;
             }
 

@@ -260,8 +260,7 @@
 
         users = (Array.isArray(data) ? data : []).map(u => {
             let reason = null;
-            if (u.paused) reason = "Paused";
-            else if (u.bill === false) reason = "Billing disabled";
+            if (u.bill === false) reason = "Billing disabled";
             else if (!u.caseId && !u.clientId) reason = "Missing link: caseId & clientId";
             else if (!u.caseId) reason = "Missing link: caseId";
             else if (!u.clientId) reason = "Missing link: clientId";
@@ -390,9 +389,7 @@
         if (u.invalid) { mark(u, "bad", u.invalidReason || "Invalid"); return; }
         if (u.skip)   { mark(u, "warn", "Skipped by user"); return; }
 
-        // Log the entire user object to see what fields are available
-        log(`Processing user - Full object:`, u);
-        log(`User ID check: u.id = ${u.id}, u._id = ${u._id}`);
+        log(`Processing user: ${u.name}`, { id: u.id });
 
         const url = UNITE_URL(u.caseId, u.clientId);
         log(`Navigating → ${u.name}`, { url });
@@ -400,169 +397,239 @@
         const nav = await sendBg({ type:"DF_NAVIGATE", url, readyXPath: READY_XP });
         if (!nav?.ok) { mark(u, "bad", `Navigate failed: ${nav?.error||"unknown"}`); return; }
 
-        const setRes = await sendBg({ type:"DF_SET_RUN_OPTS", opts });
-        if (!setRes?.ok) { log(`Warning: could not sync run opts`, setRes); }
-
         let anyBad=false, anyWarn=false;
         let reasons=[];
 
-        // --- Upload attestation (if signature) ---
-        if (opts.attemptUpload) {
-            if (u.hasSignature) {
-                log(`Generating & uploading attestation…`, { user:u.name, userId:u.id });
-                const uploadMsg = {
-                    type: "GENERATE_AND_UPLOAD",
-                    chosenDate: opts.dates.delivery,
-                    startISO:   opts.dates.start,
-                    endISO:     opts.dates.end,
-                    userId:     u.id,
-                    backendUrl: "https://dietfantasy-nkw6.vercel.app/api/ext/attestation"
-                };
-                log(`GENERATE_AND_UPLOAD message being sent:`, uploadMsg);
-                const resp = await sendBg(uploadMsg);
-                if (!resp?.ok) {
-                    anyBad = true;
-                    const reason = resp?.error || resp?.body || resp?.contentType || resp?.code || "unknown";
-                    reasons.push(`Upload: ${reason}`);
-                    log(`Generate/Upload failed`, resp);
-                } else {
-                    log(`Upload OK for ${u.name}`);
+        // ===== NEW CLEAN FLOW: Inject flow module and wait for completion =====
+        try {
+            log(`Starting user page flow for ${u.name}`);
+
+            // Clear previous flow result
+            await sendBg({
+                type: "DF_EXEC_SCRIPT",
+                code: "delete window.__USER_PAGE_FLOW_RESULT__; delete window.__USER_PAGE_INPUTS__; delete window.__ADJUSTED_DATES__;"
+            });
+
+            // Set inputs for the flow
+            await chrome.scripting.executeScript({
+                target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                func: (inputs) => {
+                    window.__USER_PAGE_INPUTS__ = inputs;
+                },
+                args: [{
+                    startISO: opts.dates.start,
+                    endISO: opts.dates.end,
+                    ratePerDay: getRatePerDay(),
+                    attemptUpload: opts.attemptUpload,
+                    attemptBilling: opts.attemptBilling,
+                    hasSignature: u.hasSignature
+                }]
+            });
+
+            // Inject the flow module
+            await chrome.scripting.executeScript({
+                target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                files: ['modules/userPageFlow.js']
+            });
+
+            log(`User page flow injected for ${u.name}, waiting for completion...`);
+
+            // Poll for flow completion (up to 30 seconds)
+            let flowResult = null;
+            let pollAttempts = 0;
+            const maxPollAttempts = 30;
+
+            while (pollAttempts < maxPollAttempts) {
+                await sleep(1000);
+                pollAttempts++;
+
+                const result = await sendBg({
+                    type: "DF_EXEC_SCRIPT",
+                    code: "window.__USER_PAGE_FLOW_RESULT__"
+                });
+
+                if (result?.result && typeof result.result === 'object') {
+                    flowResult = result.result;
+                    log(`Flow completed for ${u.name} after ${pollAttempts}s`, flowResult);
+                    break;
                 }
-            } else {
-                anyWarn = true;
-                reasons.push("Upload skipped (no signature)");
-                log(`No signature — skipping upload`, { user:u.name });
             }
+
+            if (!flowResult) {
+                anyBad = true;
+                reasons.push('Flow timeout - no response after 30s');
+                mark(u, "bad", reasons.join(" · "));
+                return;
+            }
+
+            if (!flowResult.ok) {
+                anyBad = true;
+                reasons.push(`Flow error: ${flowResult.error}`);
+                mark(u, "bad", reasons.join(" · "));
+                return;
+            }
+
+            // Check if duplicate was found
+            if (flowResult.duplicate) {
+                reasons.push('⚠️ Duplicate invoice found');
+                mark(u, "ok", reasons.join(" · "));
+                return;
+            }
+
+            // Flow succeeded, now execute upload and billing if pending
+            const adjustedDates = flowResult.adjustedDates;
+            log(`Proceeding with adjusted dates`, adjustedDates);
+
+        } catch (e) {
+            anyBad = true;
+            const msg = e?.message || String(e);
+            reasons.push(`Flow exception: ${msg}`);
+            log(`User page flow exception`, { error: msg });
+            mark(u, "bad", reasons.join(" · "));
+            return;
         }
 
-        // --- Billing (strict confirm) ---
-        // --- Billing (with simple precheck) ---
-        if (opts.attemptBilling) {
-            duplicateFoundInBilling = false; // Reset flag for current user
-            try {
-                const expect = expectFrom(u, opts);
+        // --- Upload attestation (if signature and requested) ---
+        if (opts.attemptUpload && u.hasSignature) {
+            log(`Generating & uploading attestation with adjusted dates…`, { user:u.name, userId:u.id });
 
-                // Clear any previous billing result from prior user
+            // Get adjusted dates from flow
+            const adjResult = await sendBg({
+                type: "DF_EXEC_SCRIPT",
+                code: "window.__ADJUSTED_DATES__"
+            });
+            const adjustedDates = adjResult?.result || { startISO: opts.dates.start, endISO: opts.dates.end };
+
+            const uploadMsg = {
+                type: "GENERATE_AND_UPLOAD",
+                chosenDate: opts.dates.delivery,
+                startISO:   adjustedDates.startISO,
+                endISO:     adjustedDates.endISO,
+                userId:     u.id,
+                backendUrl: "https://dietfantasy-nkw6.vercel.app/api/ext/attestation"
+            };
+            log(`GENERATE_AND_UPLOAD message with adjusted dates:`, uploadMsg);
+            const resp = await sendBg(uploadMsg);
+            if (!resp?.ok) {
+                anyBad = true;
+                const reason = resp?.error || resp?.body || resp?.contentType || resp?.code || "unknown";
+                reasons.push(`Upload: ${reason}`);
+                log(`Generate/Upload failed`, resp);
+            } else {
+                log(`Upload OK for ${u.name}`);
+            }
+        } else if (opts.attemptUpload && !u.hasSignature) {
+            anyWarn = true;
+            reasons.push("Upload skipped (no signature)");
+            log(`No signature — skipping upload`, { user:u.name });
+        }
+
+        // --- Billing (using adjusted dates only) ---
+        if (opts.attemptBilling) {
+            try {
+                log(`Starting billing with adjusted dates`, { user: u.name });
+
+                // Get adjusted dates from flow
+                const adjResult = await sendBg({
+                    type: "DF_EXEC_SCRIPT",
+                    code: "window.__ADJUSTED_DATES__"
+                });
+
+                if (!adjResult?.result) {
+                    anyBad = true;
+                    reasons.push("Billing: Adjusted dates not available");
+                    log(`❌ Adjusted dates not found`, { user: u.name });
+                    mark(u, "bad", reasons.join(" · "));
+                    return;
+                }
+
+                const adjustedDates = adjResult.result;
+                log(`Using adjusted dates for billing`, adjustedDates);
+
+                // Clear any previous billing result
                 await sendBg({
                     type: "DF_EXEC_SCRIPT",
                     code: "delete window.__billingResult; delete window.__BILLING_INPUTS__;"
                 });
 
-                // SIMPLE PRECHECK - Does this invoice already exist?
-                log(`Checking for existing invoice`, { user: u.name, dates: `${expect.startMDY} → ${expect.endMDY}`, amount: expect.amount });
-                const pre = await sendBg({ type: "DF_BILLING_PRECHECK", expect });
+                // Set billing args with adjusted dates
+                await setBillingArgsOnPage({
+                    startISO: adjustedDates.startISO,
+                    endISO: adjustedDates.endISO,
+                    ratePerDay: getRatePerDay(),
+                    userId: u.id
+                });
 
-                if (pre?.ok && pre.exists) {
-                    const dupMsg = `⚠️ DUPLICATE INVOICE - ${u.name} (${expect.startMDY} → ${expect.endMDY}, $${expect.amount})`;
-                    console.warn(`%c${dupMsg}`, 'background: #ff9800; color: white; padding: 4px 8px; font-weight: bold;');
-                    log(dupMsg, { user: u.name, dates: `${expect.startMDY} → ${expect.endMDY}` });
-                    reasons.push(`⚠️ Duplicate invoice`);
-                    mark(u, "ok", reasons.join(" · "));
-                    return;
+                // Inject billing module
+                await injectBillingModuleIIFE();
+                log(`Billing script injected for ${u.name}`);
+
+                // Poll for billing completion (up to 15 seconds)
+                let billingResult = null;
+                let pollAttempts = 0;
+                const maxPollAttempts = 15;
+
+                while (pollAttempts < maxPollAttempts) {
+                    await sleep(1000);
+                    pollAttempts++;
+
+                    const result = await sendBg({
+                        type: "DF_EXEC_SCRIPT",
+                        code: "window.__billingResult"
+                    });
+
+                    if (result?.result && typeof result.result === 'object') {
+                        billingResult = result.result;
+                        log(`Billing script completed for ${u.name} after ${pollAttempts}s`, billingResult);
+                        break;
+                    }
                 }
 
-                log(`No duplicate found, proceeding with billing`, { user: u.name });
-
-                // Now inject and verify with duplicate check before each attempt
-                let confirmed = false;
-                for (let attempt = 1; attempt <= 5 && !confirmed; attempt++) {
-                    if (duplicateFoundInBilling) {
-                        log(`Billing loop terminated early due to duplicate found signal.`);
-                        reasons.push(`⚠️ Duplicate invoice (detected by injected script)`);
-                        mark(u, "warn", reasons.join(" · "));
-                        confirmed = true; // Mark as "handled" to avoid "could not confirm" message
-                        break;
-                    }
-
-                    log(`Billing attempt ${attempt}/5`, { user: u.name });
-
-                    // Check for duplicate BEFORE this attempt
-                    log(`🔍 Checking for duplicate before attempt ${attempt}`, { user: u.name });
-
-                    // Log to page console
-                    await chrome.scripting.executeScript({
-                        target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
-                        func: (attempt) => {
-                            console.log(`\n${'='.repeat(60)}`);
-                            console.log(`[📋 PANEL] PRECHECK BEFORE ATTEMPT ${attempt}`);
-                            console.log('='.repeat(60));
-                        },
-                        args: [attempt]
-                    });
-
-                    const dupCheck = await sendBg({ type: "DF_BILLING_PRECHECK", expect });
-
-                    // Log result to page console
-                    await chrome.scripting.executeScript({
-                        target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
-                        func: (dupCheck) => {
-                            console.log('[📋 PANEL] Precheck result:', dupCheck);
-                        },
-                        args: [dupCheck]
-                    });
-
-                    if (dupCheck?.ok && dupCheck.exists) {
-                        const dupMsg = `⚠️ DUPLICATE INVOICE DETECTED on attempt ${attempt} - ${u.name} (${expect.startMDY} → ${expect.endMDY}, $${expect.amount})`;
-
-                        await chrome.scripting.executeScript({
-                            target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
-                            func: (msg) => {
-                                console.warn(`%c${msg}`, 'background: #ff9800; color: white; padding: 4px 8px; font-weight: bold;');
-                            },
-                            args: [dupMsg]
-                        });
-
-                        log(dupMsg, { user: u.name, attempt });
-                        reasons.push(`⚠️ Duplicate invoice (detected on attempt ${attempt})`);
-                        mark(u, "ok", reasons.join(" · "));
-                        confirmed = true; // Stop trying
-                        break;
-                    }
-
-                    await chrome.scripting.executeScript({
-                        target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
-                        func: (exists) => {
-                            console.log(`[📋 PANEL] ✓ No duplicate found (dupCheck.exists = ${exists})`);
-                        },
-                        args: [dupCheck?.exists]
-                    });
-
-                    log(`✓ No duplicate found, proceeding with injection`, { user: u.name, attempt });
-
-                    await setBillingArgsOnPage({
-                        startISO: opts.dates.start,
-                        endISO: opts.dates.end,
-                        ratePerDay: getRatePerDay(),
-                        userId: u.id
-                    });
-
-                    await injectBillingModuleIIFE();
-                    log(`Billing script injected`, { user: u.name, attempt });
-                    await sleep(1000); // Wait 1s after injection
+                if (!billingResult) {
+                    anyWarn = true;
+                    reasons.push("Billing script timeout");
+                    log(`⚠️ Billing script did not complete after ${maxPollAttempts}s`, { user: u.name });
+                } else if (billingResult.duplicate) {
+                    // Duplicate detected by billing script itself (early guard)
+                    reasons.push("⚠️ Duplicate invoice (caught by billing script)");
+                    log(`⚠️ Duplicate found during billing execution`, { user: u.name });
+                } else if (!billingResult.ok) {
+                    anyWarn = true;
+                    reasons.push(`Billing: ${billingResult.error || 'unknown error'}`);
+                    log(`❌ Billing failed`, billingResult);
+                } else {
+                    // Verify the billing was successful
+                    await sleep(2000); // Wait for invoice to appear
 
                     const ver = await sendBg({
                         type: "DF_BILLING_VERIFY",
-                        expect,
+                        expect: {
+                            startMDY: adjustedDates.startMDY,
+                            endMDY: adjustedDates.endMDY,
+                            amount: adjustedDates.amount
+                        },
                         timeoutMs: VERIFY_TIMEOUT_MS,
                         intervalMs: VERIFY_INTERVAL_MS
                     });
 
                     if (ver?.ok) {
-                        confirmed = true;
-                        const rec = await recordBillingSuccess(u, opts, { verified: true, attempt });
-                        if (!rec.ok) { anyWarn = true; reasons.push("Verified · record failed"); }
-                        else { log(`✅ Billing verified OK for ${u.name} on attempt ${attempt}`); }
-                        break;
+                        const rec = await recordBillingSuccess(u, {
+                            dates: {
+                                start: adjustedDates.startISO,
+                                end: adjustedDates.endISO
+                            }
+                        }, { verified: true });
+                        if (!rec.ok) {
+                            anyWarn = true;
+                            reasons.push("Verified · record failed");
+                        } else {
+                            log(`✅ Billing verified and recorded for ${u.name}`);
+                        }
+                    } else {
+                        anyWarn = true;
+                        reasons.push("Could not verify billing on page");
+                        log(`⚠️ Billing verification failed`, { note: ver?.note || "unknown" });
                     }
-
-                    log(`Billing attempt ${attempt} did not confirm`, { note: ver?.note || "unknown" });
-                    if (attempt < 5) await sleep(2000); // wait 2s before next attempt
-                }
-
-                if (!confirmed) {
-                    anyWarn = true;
-                    reasons.push("Could not confirm billing after 5 attempts");
-                    log(`❌ Billing not confirmed after 5 attempts`, { user: u.name });
                 }
             } catch (e) {
                 anyBad = true;

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DF Billing",
-  "version": "5.2.1",
+  "version": "5.2.4",
   "background": { "service_worker": "background/bridge.js" },
   "description": "Diet Fantasy Auto Billing.",
   "permissions": ["storage", "tabs", "activeTab", "scripting", "sidePanel"],

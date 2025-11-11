@@ -225,8 +225,20 @@ async function runVerifyInPage(tabId, expect) {
             const end   = parseMDY(expect.endMDY);
             const wantCents = Math.round((expect.amount || 0) * 100);
 
+            console.log('[🔍 DUPLICATE CHECK] Looking for:', {
+                startMDY: expect.startMDY,
+                endMDY: expect.endMDY,
+                amount: expect.amount,
+                wantCents,
+                start,
+                end
+            });
+
             const cards = Array.from(document.querySelectorAll('.fee-schedule-provided-service-card'));
-            for (const card of cards) {
+            console.log(`[🔍 DUPLICATE CHECK] Found ${cards.length} invoice cards on page`);
+
+            for (let i = 0; i < cards.length; i++) {
+                const card = cards[i];
                 const amtEl = card.querySelector('[data-test-element="unit-amount-value"]');
                 const rngEl = card.querySelector('[data-test-element="service-dates-value"], [data-test-element="service-start-date-value"]');
 
@@ -243,12 +255,33 @@ async function runVerifyInPage(tabId, expect) {
                     e && e.setHours(0,0,0,0);
                 }
 
+                const centsMatch = cardCents === wantCents;
+                const startMatch = sameDay(s, start);
+                const endMatch = sameDay(e, end);
+
+                console.log(`[🔍 DUPLICATE CHECK] Card ${i+1}:`, {
+                    txtAmt,
+                    txtRange,
+                    cardCents,
+                    wantCents,
+                    centsMatch,
+                    startMatch,
+                    endMatch,
+                    cardStart: s,
+                    wantStart: start,
+                    cardEnd: e,
+                    wantEnd: end
+                });
+
                 if (Number.isFinite(cardCents) && s && e &&
                     cardCents === wantCents &&
                     sameDay(s, start) && sameDay(e, end)) {
+                    console.log(`[🔍 DUPLICATE CHECK] ✅ MATCH FOUND!`);
                     return { ok: true, note: 'matched card' };
                 }
             }
+
+            console.log('[🔍 DUPLICATE CHECK] ❌ No matching card found');
 
             // check for error/draft banners to help debug
             const anyError = !!document.querySelector('[role="alert"], .alert, .error, .toast--error');
@@ -374,6 +407,91 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     sendResponse({ ok:false, error: e?.message || String(e) });
                     return;
                 }
+            }
+
+            // --- Check auth info on page ---
+            if (msg.type === "CHECK_AUTH_INFO") {
+                const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        console.log('[AUTH CHECK] Looking for auth elements...');
+                        const byXPath = (xp) => document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+
+                        // Try CSS selector first
+                        let amountEl = document.querySelector('#basic-table-authorized-amount-value');
+                        let datesEl = document.querySelector('#basic-table-authorized-service-delivery-date-s-value');
+
+                        // If not found, try XPath
+                        if (!amountEl) {
+                            amountEl = byXPath('//*[@id="basic-table-authorized-amount-value"]');
+                        }
+                        if (!datesEl) {
+                            datesEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]/div/table/tbody/tr[3]/td[2]');
+                        }
+
+                        console.log('[AUTH CHECK] amountEl:', amountEl);
+                        console.log('[AUTH CHECK] datesEl:', datesEl);
+
+                        if (amountEl && datesEl) {
+                            // Get text from span child if it exists
+                            const amountSpan = amountEl.querySelector('span');
+                            const amountText = amountSpan ? amountSpan.textContent : amountEl.textContent;
+
+                            const result = {
+                                found: true,
+                                authorizedAmount: amountText.trim(),
+                                authorizedDates: datesEl.textContent.trim()
+                            };
+                            console.log('[AUTH CHECK] ✅ Found auth info:', result);
+                            return result;
+                        }
+
+                        console.log('[AUTH CHECK] ❌ Auth elements not found');
+                        return { found: false };
+                    }
+                });
+                sendResponse({ ok: true, result: results?.[0]?.result });
+                return;
+            }
+
+            // --- Execute arbitrary script in page (CSP-safe: only property access/delete) ---
+            if (msg.type === "DF_EXEC_SCRIPT") {
+                const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                const results = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: (code) => {
+                        try {
+                            // Handle "delete window.foo; delete window.bar;"
+                            if (code.includes('delete ')) {
+                                const deleteStatements = code.split(';').map(s => s.trim()).filter(s => s.startsWith('delete '));
+                                for (const stmt of deleteStatements) {
+                                    const prop = stmt.replace(/^delete\s+window\./, '').replace(/;$/, '');
+                                    if (prop && window.hasOwnProperty(prop)) {
+                                        delete window[prop];
+                                    }
+                                }
+                                return { ok: true, deleted: deleteStatements.length };
+                            }
+
+                            // Safe property access without eval
+                            // Supports: "window.foo", "window.foo.bar", etc.
+                            const path = code.replace(/^window\./, '').split('.');
+                            let value = window;
+                            for (const key of path) {
+                                if (key === '') continue; // Handle "window" prefix
+                                value = value?.[key];
+                                if (value === undefined) break;
+                            }
+                            return value;
+                        } catch (e) {
+                            return { __error: e?.message || String(e) };
+                        }
+                    },
+                    args: [msg.code || ""]
+                });
+                sendResponse({ ok: true, result: results?.[0]?.result });
+                return;
             }
 
             // --- Billing page verification hooks ---

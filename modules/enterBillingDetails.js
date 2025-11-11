@@ -776,8 +776,14 @@
             return; // Error already set in submit
         }
 
-        console.log('[enterBillingDetails] Done.');
-        window.__billingResult = { ok: true };
+        console.log('[enterBillingDetails] Done. Actual billing:', fmtMDY(billStart), '→', fmtMDY(billEnd), '$' + amount);
+        // Return the ACTUAL dates and amount that were entered (after adjustment)
+        window.__billingResult = {
+            ok: true,
+            actualStart: fmtMDY(billStart),
+            actualEnd: fmtMDY(billEnd),
+            actualAmount: amount
+        };
     } catch (err) {
         console.error('[enterBillingDetails] Uncaught error:', err);
         window.__billingResult = { ok: false, error: 'Unexpected error: ' + (err.message || String(err)) };
