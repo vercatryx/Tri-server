@@ -498,7 +498,17 @@
                 type: "DF_EXEC_SCRIPT",
                 code: "window.__ADJUSTED_DATES__"
             });
-            const adjustedDates = adjResult?.result || { startISO: opts.dates.start, endISO: opts.dates.end };
+            const adjustedDates = adjResult?.result;
+
+            // Validate that we have proper ISO dates
+            if (!adjustedDates?.startISO || !adjustedDates?.endISO) {
+                anyBad = true;
+                const reason = "Upload: Missing adjusted dates from flow";
+                reasons.push(reason);
+                log(`Cannot upload - adjusted dates not available`, { adjResult });
+                mark(u, "bad", reasons.join(" · "));
+                return;
+            }
 
             const uploadMsg = {
                 type: "GENERATE_AND_UPLOAD",
@@ -546,49 +556,89 @@
                 const adjustedDates = adjResult.result;
                 log(`Using adjusted dates for billing`, adjustedDates);
 
-                // Clear any previous billing result
-                await sendBg({
-                    type: "DF_EXEC_SCRIPT",
-                    code: "delete window.__billingResult; delete window.__BILLING_INPUTS__;"
-                });
-
-                // Set billing args with adjusted dates
-                await setBillingArgsOnPage({
-                    startISO: adjustedDates.startISO,
-                    endISO: adjustedDates.endISO,
-                    ratePerDay: getRatePerDay(),
-                    userId: u.id
-                });
-
-                // Inject billing module
-                await injectBillingModuleIIFE();
-                log(`Billing script injected for ${u.name}`);
-
-                // Poll for billing completion (up to 15 seconds)
+                // Retry logic for billing injection (up to 5 attempts)
                 let billingResult = null;
-                let pollAttempts = 0;
-                const maxPollAttempts = 15;
+                const maxBillingAttempts = 5;
 
-                while (pollAttempts < maxPollAttempts) {
-                    await sleep(1000);
-                    pollAttempts++;
+                for (let billingAttempt = 1; billingAttempt <= maxBillingAttempts; billingAttempt++) {
+                    if (billingAttempt > 1) {
+                        log(`Billing attempt ${billingAttempt}/${maxBillingAttempts} for ${u.name}`);
+                        await sleep(1000); // Wait 1 second between retries
+                    }
 
-                    const result = await sendBg({
+                    // Clear any previous billing result
+                    await sendBg({
                         type: "DF_EXEC_SCRIPT",
-                        code: "window.__billingResult"
+                        code: "delete window.__billingResult; delete window.__BILLING_INPUTS__;"
                     });
 
-                    if (result?.result && typeof result.result === 'object') {
-                        billingResult = result.result;
-                        log(`Billing script completed for ${u.name} after ${pollAttempts}s`, billingResult);
-                        break;
+                    // Set billing args with adjusted dates
+                    await setBillingArgsOnPage({
+                        startISO: adjustedDates.startISO,
+                        endISO: adjustedDates.endISO,
+                        ratePerDay: getRatePerDay(),
+                        userId: u.id
+                    });
+
+                    // Inject billing module
+                    await injectBillingModuleIIFE();
+                    log(`Billing script injected for ${u.name} (attempt ${billingAttempt})`);
+
+                    // Poll for billing completion (up to 15 seconds per attempt)
+                    let pollAttempts = 0;
+                    const maxPollAttempts = 15;
+
+                    while (pollAttempts < maxPollAttempts) {
+                        await sleep(1000);
+                        pollAttempts++;
+
+                        const result = await sendBg({
+                            type: "DF_EXEC_SCRIPT",
+                            code: "window.__billingResult"
+                        });
+
+                        if (result?.result && typeof result.result === 'object') {
+                            billingResult = result.result;
+                            log(`Billing script completed for ${u.name} after ${pollAttempts}s (attempt ${billingAttempt})`, billingResult);
+                            break;
+                        }
+                    }
+
+                    // Check if billing succeeded
+                    if (billingResult && billingResult.ok) {
+                        log(`✅ Billing succeeded on attempt ${billingAttempt}`);
+                        break; // Success! Exit retry loop
+                    } else if (billingResult && billingResult.duplicate) {
+                        log(`Duplicate detected on attempt ${billingAttempt} - no retry needed`);
+                        break; // Duplicate is a definitive result, don't retry
+                    } else if (billingResult && billingResult.error) {
+                        const errorLower = billingResult.error.toLowerCase();
+                        const isElementNotFound = errorLower.includes('not found') ||
+                                                 errorLower.includes('missing') ||
+                                                 errorLower.includes('add button') ||
+                                                 errorLower.includes('form elements');
+
+                        if (isElementNotFound && billingAttempt < maxBillingAttempts) {
+                            log(`⚠️ Elements not found, will retry (attempt ${billingAttempt}/${maxBillingAttempts})`);
+                            billingResult = null; // Clear result to retry
+                            continue; // Retry
+                        } else {
+                            log(`❌ Billing error (no retry): ${billingResult.error}`);
+                            break; // Other errors or max attempts reached
+                        }
+                    } else if (!billingResult) {
+                        log(`⚠️ Billing timeout on attempt ${billingAttempt}/${maxBillingAttempts}`);
+                        if (billingAttempt < maxBillingAttempts) {
+                            continue; // Retry on timeout
+                        }
                     }
                 }
 
+                // Handle final result after all retries
                 if (!billingResult) {
                     anyWarn = true;
-                    reasons.push("Billing script timeout");
-                    log(`⚠️ Billing script did not complete after ${maxPollAttempts}s`, { user: u.name });
+                    reasons.push("Billing script timeout after retries");
+                    log(`⚠️ Billing script did not complete after ${maxBillingAttempts} attempts`, { user: u.name });
                 } else if (billingResult.duplicate) {
                     // Duplicate detected by billing script itself (early guard)
                     reasons.push("⚠️ Duplicate invoice (caught by billing script)");
@@ -596,7 +646,7 @@
                 } else if (!billingResult.ok) {
                     anyWarn = true;
                     reasons.push(`Billing: ${billingResult.error || 'unknown error'}`);
-                    log(`❌ Billing failed`, billingResult);
+                    log(`❌ Billing failed after ${maxBillingAttempts} attempts`, billingResult);
                 } else {
                     // Verify the billing was successful
                     await sleep(2000); // Wait for invoice to appear
@@ -660,6 +710,17 @@
 
         const opts = readOptsFromUI();
         const ratePerDay = getRatePerDay();
+
+        // Validate dates are filled if upload or billing is enabled
+        if ((opts.attemptUpload || opts.attemptBilling) && (!opts.dates.start || !opts.dates.end)) {
+            log("ERROR: Start and End dates are required");
+            alert("Please fill in Start Date and End Date before running");
+            setRunningUI(false);
+            stopRequested = false;
+            isPaused = false;
+            return;
+        }
+
         log(`Auto run started`, { upload:opts.attemptUpload, billing:opts.attemptBilling, dates:opts.dates, ratePerDay });
 
         // In Some mode, only process selected users

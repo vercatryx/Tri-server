@@ -223,17 +223,11 @@
     const isDuplicate = checkDuplicate(adjustedDates.startMDY, adjustedDates.endMDY, adjustedDates.amount);
 
     if (isDuplicate) {
-        console.log('[USER PAGE FLOW] ⚠️ Duplicate invoice detected - finishing immediately');
-        window.__USER_PAGE_FLOW_RESULT__ = {
-            ok: true,
-            duplicate: true,
-            adjustedDates,
-            message: 'Duplicate invoice found - skipped upload and billing'
-        };
-        return;
+        console.log('[USER PAGE FLOW] ⚠️ Duplicate invoice detected - will upload but skip billing');
+        // Don't return early - continue with upload but skip billing
+    } else {
+        console.log('[USER PAGE FLOW] ✅ No duplicate found - proceeding with upload and billing');
     }
-
-    console.log('[USER PAGE FLOW] ✅ No duplicate found - proceeding with upload and billing');
 
     // ===== STEP 4: Upload (if requested, with adjusted dates only) =====
     if (inputs.attemptUpload && inputs.hasSignature) {
@@ -246,21 +240,27 @@
     }
 
     // ===== STEP 5: Billing (if requested, with adjusted dates only) =====
-    if (inputs.attemptBilling) {
+    // Skip billing if duplicate is found
+    if (inputs.attemptBilling && !isDuplicate) {
         console.log('[USER PAGE FLOW] Step 5: Billing will use adjusted dates...');
 
         // Billing module will read from window.__ADJUSTED_DATES__
         window.__BILLING_PENDING__ = true;
     } else {
-        console.log('[USER PAGE FLOW] Step 5: Billing skipped');
+        if (isDuplicate) {
+            console.log('[USER PAGE FLOW] Step 5: Billing skipped due to duplicate');
+        } else {
+            console.log('[USER PAGE FLOW] Step 5: Billing skipped');
+        }
     }
 
     window.__USER_PAGE_FLOW_RESULT__ = {
         ok: true,
-        duplicate: false,
+        duplicate: isDuplicate,
         adjustedDates,
         uploadPending: !!window.__UPLOAD_PENDING__,
-        billingPending: !!window.__BILLING_PENDING__
+        billingPending: !!window.__BILLING_PENDING__,
+        message: isDuplicate ? 'Duplicate invoice found - uploaded but skipped billing' : null
     };
 
     console.log('[USER PAGE FLOW] ✅ Flow completed:', window.__USER_PAGE_FLOW_RESULT__);

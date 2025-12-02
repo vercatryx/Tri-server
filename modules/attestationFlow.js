@@ -35,7 +35,19 @@
     }
 
     async function getSavedParams() {
-        // Prefer popup globals (if your popup wrote them into window.__ATT_POPUP_PARAMS__)
+        // FIRST: Check if userPageFlow.js has already adjusted dates
+        const adjusted = window.__ADJUSTED_DATES__;
+        if (adjusted && adjusted.startISO && adjusted.endISO) {
+            console.log('[attestationFlow] Using adjusted dates from userPageFlow:', adjusted);
+            return {
+                chosenDate:     adjusted.startISO, // Use adjusted start as delivery
+                startISO:       adjusted.startISO,
+                endISO:         adjusted.endISO,
+                attestationISO: toISO(new Date().toISOString().slice(0, 10)) || null,
+            };
+        }
+
+        // SECOND: Prefer popup globals (if your popup wrote them into window.__ATT_POPUP_PARAMS__)
         const g = (window.__ATT_POPUP_PARAMS__ || {});
         const hasGlobals = !!(g.chosenDate || g.startISO || g.endISO || g.attestationISO);
         if (hasGlobals) {
@@ -47,7 +59,7 @@
             };
         }
 
-        // Fallback to chrome.storage.sync (your popup/Navigator UI save here)
+        // THIRD: Fallback to chrome.storage.sync (your popup/Navigator UI save here)
         const sync = await new Promise((resolve) => {
             try {
                 chrome.storage.sync.get(['startDate','endDate','attestationDate'], (data) => resolve(data || {}));
@@ -427,17 +439,17 @@
         }
 
         if (isDuplicate) {
-            const err = `Duplicate invoice detected for ${startMDY} → ${endMDY}, $${expectedAmount}`;
-            console.warn('[attestationFlow]', err);
-            emit(onProgress, "gen_upload:failed", { error: err });
+            console.warn('[attestationFlow] ⚠️ Duplicate invoice detected for', `${startMDY} → ${endMDY}, $${expectedAmount}`);
+            console.warn('[attestationFlow] Will proceed with upload but skip billing');
+            emit(onProgress, "duplicate_check:found_continue", { message: "Duplicate found - will upload but skip billing" });
             try {
                 chrome.runtime?.sendMessage?.({ type: 'DF_BILLING_DUPLICATE_FOUND' });
             } catch {}
-            return { ok: false, step: "duplicate_check", error: err, duplicate: true };
+            // Don't return early - continue with upload
+        } else {
+            console.log('[attestationFlow] No duplicate found, proceeding with generation');
+            emit(onProgress, "duplicate_check:passed");
         }
-
-        console.log('[attestationFlow] No duplicate found, proceeding with generation');
-        emit(onProgress, "duplicate_check:passed");
 
         /* ========= Payload to backend: SNAKE_CASE + ISO ========= */
         const payload = {
@@ -490,7 +502,7 @@
         const uploaded = await window.pdfUploader.attachBytes(bytesU8, finalFilename);
         emit(onProgress, "upload:done", { uploaded });
 
-        return { ok: true, person, upload: uploaded };
+        return { ok: true, person, upload: uploaded, duplicate: isDuplicate };
     }
 
     window.attestationFlow = { generateAndUpload };
