@@ -5,10 +5,16 @@
 //   - uploadTest()  // uses background FETCH_FILE_BYTES for a public PDF
 
 (function () {
-    if (window.pdfUploader) return;
+    if (window.pdfUploader) {
+        console.log("[uploadPDF] Already loaded, skipping re-initialization");
+        return;
+    }
 
     const log = (...a) => { try { console.log("[uploadPDF]", ...a); } catch {} };
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // Guard against double uploads
+    let uploadInProgress = false;
 
     async function waitFor(sel, root = document, timeout = 6000) {
         const hit = root.querySelector(sel);
@@ -24,22 +30,30 @@
     }
 
     async function openModal() {
-        // Primary button
-        let btn = document.querySelector('#upload-document-link');
-        // Fallback XPath
+        // Click the billing details "Attach Document" button
+        // This button appears in the invoice details entry shelf after billing details are filled
+        let btn = document.querySelector('.payments-attachment-button');
+
+        // Try by partial ID match if class selector fails
         if (!btn) {
-            try {
-                const xp = "/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[4]/div/div/div[2]/button";
-                btn = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-            } catch {}
+            const buttons = document.querySelectorAll('button[id^="payments-attachment-button"]');
+            if (buttons.length > 0) {
+                // Find visible button with "Attach Document" text
+                btn = Array.from(buttons).find(b => {
+                    const text = (b.textContent || '').trim();
+                    return text.includes('Attach Document') && b.offsetParent !== null;
+                });
+            }
         }
+
         if (btn) {
+            log("Clicking 'Attach Document' button in billing details shelf");
             btn.click();
-            log("Clicked 'Attach a document'");
-            await sleep(200); // 0.2s for modal to render
+            await sleep(300); // Wait for dialog to render
             return true;
         }
-        log("Attach button not found; assuming modal already open");
+
+        log("Attach Document button not found; assuming dialog already open");
         return false;
     }
 
@@ -50,10 +64,67 @@
     }
 
     async function attachBytes(rawBytes, filename) {
+        // Guard against concurrent uploads
+        if (uploadInProgress) {
+            log("⚠ Upload already in progress, skipping duplicate call");
+            return { ok: false, error: "Upload already in progress" };
+        }
+
+        uploadInProgress = true;
+        try {
+            return await attachBytesImpl(rawBytes, filename);
+        } finally {
+            uploadInProgress = false;
+        }
+    }
+
+    async function attachBytesImpl(rawBytes, filename) {
         // Accept Uint8Array OR Array<number>
         const u8 = rawBytes instanceof Uint8Array ? rawBytes : new Uint8Array(rawBytes);
 
-        const modal = await waitFor('#upload-document-modal.dialog.open');
+        // Try to find any upload dialog that's currently open
+        let modal = null;
+
+        // Method 1: Look for .dialog-paper with "Attach Documents" title
+        try {
+            log("Looking for .dialog-paper...");
+            const dialogs = document.querySelectorAll('.dialog-paper');
+            log(`Found ${dialogs.length} .dialog-paper elements`);
+
+            for (const dialog of dialogs) {
+                const title = dialog.querySelector('.title');
+                log(`Dialog title: "${title?.textContent}"`);
+                if (title && title.textContent.includes('Attach Document')) {
+                    modal = dialog;
+                    log("✓ Found 'Attach Documents' dialog");
+                    break;
+                }
+            }
+        } catch (e) {
+            log("Error searching for dialog:", e);
+        }
+
+        // Method 2: Look for any visible file upload dialog
+        if (!modal) {
+            log("Trying alternative: looking for file-upload-dropzone...");
+            const dropzones = document.querySelectorAll('.file-upload-dropzone');
+            log(`Found ${dropzones.length} dropzone elements`);
+
+            for (const dz of dropzones) {
+                const parent = dz.closest('.dialog-paper') || dz.closest('[role="dialog"]') || dz.closest('.dialog');
+                if (parent && parent.offsetParent !== null) {
+                    modal = parent;
+                    log("✓ Found dialog via dropzone");
+                    break;
+                }
+            }
+        }
+
+        if (!modal) {
+            log("✗ No dialog found");
+            throw new Error("No upload dialog found. Make sure the 'Attach Document' dialog is open.");
+        }
+
         const input =
             modal.querySelector('input[type="file"][data-testid="file-upload-input"]') ||
             modal.querySelector('input[type="file"]');
@@ -64,35 +135,85 @@
             modal.querySelector('[data-testid*="drop"]') ||
             modal.querySelector('[class*="dropzone"]');
 
-        const submitBtn = modal.querySelector('#upload-submit-btn');
+        // Find submit button for the billing dialog
+        let submitBtn =
+            modal.querySelector('.attach-document-dialog__actions--save') ||
+            modal.querySelector('button[aria-label="Attach"]');
 
         const pdfName = ensurePdfName(filename);
         const blob = new Blob([u8], { type: 'application/pdf' });
         const file = new File([blob], pdfName, { type: 'application/pdf', lastModified: Date.now() });
 
-        // Assign to input.files (use native setter if patched)
+        log(`Created file: ${pdfName}, size: ${file.size} bytes`);
+
+        // Create DataTransfer with file
         const dt = new DataTransfer();
         dt.items.add(file);
-        const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files');
-        if (desc && desc.set) desc.set.call(input, dt.files);
-        else input.files = dt.files;
 
-        input.dispatchEvent(new Event('input',  { bubbles: true, composed: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-
-        // Also synthesize drop (harmless if uploader ignores it)
-        if (dropzone) {
-            const dt2 = new DataTransfer();
-            dt2.items.add(file);
-            const mkEvt = (t) => new DragEvent(t, { bubbles: true, cancelable: true, composed: true, dataTransfer: dt2 });
-            dropzone.dispatchEvent(mkEvt('dragenter'));
-            dropzone.dispatchEvent(mkEvt('dragover'));
-            dropzone.dispatchEvent(mkEvt('drop'));
+        // Method 1: Set input.files directly using native setter
+        try {
+            const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files');
+            if (desc && desc.set) {
+                desc.set.call(input, dt.files);
+                log("Set files via native setter");
+            } else {
+                input.files = dt.files;
+                log("Set files via direct assignment");
+            }
+        } catch (e) {
+            log("Warning: Could not set input.files", e);
         }
 
-        await sleep(150);
-        if (submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true') {
+        // Method 2: Simulate drag and drop on dropzone
+        if (dropzone) {
+            log("Simulating drag and drop on dropzone...");
+            const dt2 = new DataTransfer();
+            dt2.items.add(file);
+
+            const dropEvent = new DragEvent('drop', {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                dataTransfer: dt2
+            });
+
+            dropzone.dispatchEvent(dropEvent);
+            log("Drop event dispatched on dropzone");
+        }
+
+        // Method 3: Fire change event on input (single event only)
+        log("Firing change event...");
+        input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+        await sleep(500); // Wait longer for UI to process
+
+        // Wait for button to become enabled (dialog starts with disabled button)
+        log("Waiting for submit button to become enabled...");
+        log(`Submit button initial state: disabled=${submitBtn?.disabled}, aria-disabled=${submitBtn?.getAttribute('aria-disabled')}`);
+
+        for (let i = 0; i < 30; i++) {
+            if (submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true') {
+                log(`✓ Submit button enabled after ${i * 100}ms`);
+                break;
+            }
+            await sleep(100);
+        }
+
+        // Final check and click
+        const isEnabled = submitBtn && !submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true';
+        log(`Submit button final state: disabled=${submitBtn?.disabled}, aria-disabled=${submitBtn?.getAttribute('aria-disabled')}, isEnabled=${isEnabled}`);
+
+        if (isEnabled) {
+            log("✓ Clicking submit button");
             submitBtn.click();
+            await sleep(500); // Wait for upload to process
+        } else {
+            log("✗ Submit button still not enabled");
+            // Try to find if there's a preview or file listed
+            const fileList = modal.querySelector('.file-upload-dropzone__preview');
+            if (fileList) {
+                log("Dropzone preview content:", fileList.textContent);
+            }
         }
 
         return { ok: true, name: file.name, size: file.size };

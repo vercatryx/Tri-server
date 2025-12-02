@@ -127,14 +127,17 @@
                     <button class="btn red"    id="btnStop">Stop</button>
                 </div>
                 <div class="rowB" id="runOpts">
-                    <button class="btn toggle active" id="btnUpload" data-checked="true">Upload</button>
-                    <button class="btn toggle active" id="btnBilling" data-checked="true">Billing</button>
-                    <label for="inpDeliveryDate">Delivery</label>
-                    <input type="date" id="inpDeliveryDate" />
                     <label for="inpStartDate">Start</label>
                     <input type="date" id="inpStartDate" />
                     <label for="inpEndDate">End</label>
                     <input type="date" id="inpEndDate" />
+                </div>
+                <div class="rowB" style="align-items: center;">
+                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                        <input type="checkbox" id="chkCustomDelivery" style="width: auto; cursor: pointer;">
+                        <span style="font-size: 12px; color: var(--muted);">Custom Delivery Date</span>
+                    </label>
+                    <input type="date" id="inpDeliveryDate" style="display: none;" />
                 </div>
                 <div class="searchRow">
                     <input id="inpSearch" type="text" placeholder="Search by name…" autocomplete="off" />

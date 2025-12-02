@@ -28,6 +28,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnCreateUser = document.getElementById('btnCreateUser');
     const btnClearLog = document.getElementById('btnClearLog');
 
+    // Test buttons
+    const btnTestAttach = document.getElementById('btnTestAttach');
+    const btnTestDirect = document.getElementById('btnTestDirect');
+
     // ---------- CONSTS ----------
     const API_BASE      = "https://dietfantasy-nkw6.vercel.app";
     const API_URL       = `${API_BASE}/api/ext/users`;
@@ -237,6 +241,124 @@ document.addEventListener('DOMContentLoaded', () => {
             log('Dummy upload complete.', resp);
         } catch (e) {
             setStatus(e.message, 'error'); log('Dummy upload failed', { error: e.message });
+        }
+    });
+
+    // Test Attach (assumes dialog is already open)
+    btnTestAttach.addEventListener('click', async () => {
+        try {
+            setStatus('Testing attach with open dialog…');
+            log('Injecting uploadpdf.js module...');
+
+            // Inject uploadpdf module
+            await injectFile('modules/uploadpdf.js');
+            await new Promise(r => setTimeout(r, 200));
+
+            log('Creating minimal test PDF...');
+            // Create a minimal valid PDF (just a few bytes for testing)
+            // This is a minimal PDF structure
+            const pdfContent = '%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 44 >>\nstream\nBT\n/F1 12 Tf\n100 700 Td\n(Test PDF) Tj\nET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f\n0000000009 00000 n\n0000000058 00000 n\n0000000115 00000 n\n0000000317 00000 n\ntrailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n408\n%%EOF';
+
+            log(`Created test PDF (${pdfContent.length} bytes), calling attachBytes...`);
+
+            // Set the PDF content on the page first
+            await sendBg({
+                type: "DF_EXEC_SCRIPT",
+                code: `window.__TEST_PDF_CONTENT__ = ${JSON.stringify(pdfContent)};`
+            });
+
+            // Then call attachBytes in a separate script execution
+            const result = await sendBg({
+                type: "DF_EXEC_SCRIPT",
+                code: `
+                    (async function() {
+                        try {
+                            if (!window.pdfUploader) {
+                                console.error('[Test] pdfUploader not loaded');
+                                return { ok: false, error: 'pdfUploader not loaded' };
+                            }
+                            const pdfText = window.__TEST_PDF_CONTENT__;
+                            const bytes = new TextEncoder().encode(pdfText);
+                            console.log('[Test] Calling attachBytes with', bytes.length, 'bytes');
+                            const result = await window.pdfUploader.attachBytes(bytes, 'test-attach.pdf');
+                            console.log('[Test] attachBytes returned:', result);
+                            return result;
+                        } catch (err) {
+                            console.error('[Test] Error:', err);
+                            return { ok: false, error: err.message || String(err) };
+                        }
+                    })()
+                `
+            });
+
+            log('attachBytes result:', result);
+
+            if (result?.result?.ok) {
+                setStatus('Test attach complete!', 'success');
+                log('Attach successful:', result.result);
+            } else {
+                const error = result?.result?.error || 'attach failed - check browser console for details';
+                throw new Error(error);
+            }
+        } catch (e) {
+            setStatus(e.message, 'error');
+            log('Test attach failed', { error: e.message });
+        }
+    });
+
+    // Test Direct Upload - simpler approach that directly injects and runs in page context
+    btnTestDirect.addEventListener('click', async () => {
+        try {
+            log('=== Test Direct Upload clicked ===');
+            setStatus('Testing direct upload…');
+
+            // Get active tab
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tab?.id) throw new Error('No active tab');
+            log('Active tab ID:', tab.id);
+
+            // Always inject uploadpdf (module has its own guard)
+            log('Injecting uploadpdf.js module...');
+            await injectFile('modules/uploadpdf.js');
+            await new Promise(r => setTimeout(r, 300));
+
+            log('Injecting test script directly into page...');
+
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: async () => {
+                    // This runs directly in the page context
+                    console.log('[DirectTest] Starting test upload...');
+
+                    if (!window.pdfUploader) {
+                        console.error('[DirectTest] pdfUploader not loaded!');
+                        return { ok: false, error: 'pdfUploader not loaded' };
+                    }
+
+                    // Create minimal PDF
+                    const pdfContent = '%PDF-1.4\n1 0 obj\n<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>endobj\nxref\n0 4\n0000000000 65535 f\n0000000009 00000 n\n0000000052 00000 n\n0000000101 00000 n\ntrailer\n<</Size 4/Root 1 0 R>>\nstartxref\n190\n%%EOF';
+                    const bytes = new TextEncoder().encode(pdfContent);
+
+                    console.log('[DirectTest] Created PDF:', bytes.length, 'bytes');
+                    console.log('[DirectTest] Calling attachBytes...');
+
+                    try {
+                        const result = await window.pdfUploader.attachBytes(bytes, 'direct-test.pdf');
+                        console.log('[DirectTest] Result:', result);
+                        return result;
+                    } catch (err) {
+                        console.error('[DirectTest] Error in attachBytes:', err);
+                        return { ok: false, error: err.message };
+                    }
+                }
+            });
+
+            setStatus('Direct test complete - check console', 'success');
+            log('Direct test executed. Check browser console for [DirectTest] and [uploadPDF] logs.');
+
+        } catch (e) {
+            setStatus(e.message, 'error');
+            log('Direct test failed', { error: e.message });
         }
     });
 

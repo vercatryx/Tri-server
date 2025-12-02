@@ -30,12 +30,12 @@
     const btnStop     = document.getElementById("btnStop");
     const btnClose    = document.getElementById("btnClose");
 
-    const btnUpload = document.getElementById("btnUpload");
-    const btnBilling= document.getElementById("btnBilling");
+    // Upload and Billing buttons removed - now always done together
     const inpDeliv  = document.getElementById("inpDeliveryDate");
     const inpStart  = document.getElementById("inpStartDate");
     const inpEnd    = document.getElementById("inpEndDate");
     const inpSearch = document.getElementById("inpSearch");
+    const chkCustomDelivery = document.getElementById("chkCustomDelivery");
 
     const countFoot = document.getElementById("countFoot");
 
@@ -81,19 +81,31 @@
     const reflectOptsToUI=(o)=>{
         const uploadOn = !!o.attemptUpload;
         const billingOn = !!o.attemptBilling;
-        btnUpload.classList.toggle('active', uploadOn);
-        btnUpload.dataset.checked = uploadOn;
-        btnBilling.classList.toggle('active', billingOn);
-        btnBilling.dataset.checked = billingOn;
-        inpDeliv.value=o.dates?.delivery||"";
+        // Upload and Billing are now always on together
         inpStart.value=o.dates?.start||"";
         inpEnd.value=o.dates?.end||"";
+
+        // Handle delivery date - defaults to start date unless custom is checked
+        const hasCustomDelivery = o.dates?.delivery && o.dates.delivery !== o.dates?.start;
+        chkCustomDelivery.checked = hasCustomDelivery;
+        if (hasCustomDelivery) {
+            inpDeliv.value = o.dates.delivery;
+            inpDeliv.style.display = '';
+        } else {
+            inpDeliv.value = o.dates?.start || "";
+            inpDeliv.style.display = 'none';
+        }
     };
     const readOptsFromUI=()=>{
+        const startDate = inpStart.value || "";
+        const endDate = inpEnd.value || "";
+        // Delivery date: use custom if checked, otherwise use start date
+        const deliveryDate = chkCustomDelivery.checked ? (inpDeliv.value || startDate) : startDate;
+
         const o={
-            attemptUpload: btnUpload.dataset.checked === 'true',
-            attemptBilling: btnBilling.dataset.checked === 'true',
-            dates:{ delivery:inpDeliv.value||"", start:inpStart.value||"", end:inpEnd.value||"" }
+            attemptUpload: true,  // Always on
+            attemptBilling: true, // Always on
+            dates:{ delivery: deliveryDate, start: startDate, end: endDate }
         };
         saveOpts(o);
         return o;
@@ -308,10 +320,17 @@
         return `${Number(m)}/${Number(d)}/${y}`;
     };
 
-    async function setBillingArgsOnPage({ startISO, endISO, ratePerDay=48, userId }) {
+    async function setBillingArgsOnPage({ startISO, endISO, ratePerDay=48, userId, attemptUpload=false, hasSignature=false }) {
         const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab?.id) throw new Error("No active tab");
-        const args = { start: toMDY(startISO), end: toMDY(endISO), ratePerDay: Number(ratePerDay)||48, userId: Number(userId)||null };
+        const args = {
+            start: toMDY(startISO),
+            end: toMDY(endISO),
+            ratePerDay: Number(ratePerDay)||48,
+            userId: Number(userId)||null,
+            attemptUpload: !!attemptUpload,
+            hasSignature: !!hasSignature
+        };
         await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: (incoming)=>{ window.__BILLING_INPUTS__ = incoming; },
@@ -489,53 +508,11 @@
             return;
         }
 
-        // --- Upload attestation (if signature and requested) ---
-        if (opts.attemptUpload && u.hasSignature) {
-            log(`Generating & uploading attestation with adjusted dates…`, { user:u.name, userId:u.id });
+        // --- Upload moved to INSIDE billing details flow ---
+        // Upload now happens AFTER billing details are entered, as part of the invoice details entry
 
-            // Get adjusted dates from flow
-            const adjResult = await sendBg({
-                type: "DF_EXEC_SCRIPT",
-                code: "window.__ADJUSTED_DATES__"
-            });
-            const adjustedDates = adjResult?.result;
-
-            // Validate that we have proper ISO dates
-            if (!adjustedDates?.startISO || !adjustedDates?.endISO) {
-                anyBad = true;
-                const reason = "Upload: Missing adjusted dates from flow";
-                reasons.push(reason);
-                log(`Cannot upload - adjusted dates not available`, { adjResult });
-                mark(u, "bad", reasons.join(" · "));
-                return;
-            }
-
-            const uploadMsg = {
-                type: "GENERATE_AND_UPLOAD",
-                chosenDate: opts.dates.delivery,
-                startISO:   adjustedDates.startISO,
-                endISO:     adjustedDates.endISO,
-                userId:     u.id,
-                backendUrl: "https://dietfantasy-nkw6.vercel.app/api/ext/attestation"
-            };
-            log(`GENERATE_AND_UPLOAD message with adjusted dates:`, uploadMsg);
-            const resp = await sendBg(uploadMsg);
-            if (!resp?.ok) {
-                anyBad = true;
-                const reason = resp?.error || resp?.body || resp?.contentType || resp?.code || "unknown";
-                reasons.push(`Upload: ${reason}`);
-                log(`Generate/Upload failed`, resp);
-            } else {
-                log(`Upload OK for ${u.name}`);
-            }
-        } else if (opts.attemptUpload && !u.hasSignature) {
-            anyWarn = true;
-            reasons.push("Upload skipped (no signature)");
-            log(`No signature — skipping upload`, { user:u.name });
-        }
-
-        // --- Billing (using adjusted dates only) ---
-        if (opts.attemptBilling) {
+        // --- Billing + Upload (now always done together) ---
+        if (true) { // Always attempt billing and upload
             try {
                 log(`Starting billing with adjusted dates`, { user: u.name });
 
@@ -577,8 +554,28 @@
                         startISO: adjustedDates.startISO,
                         endISO: adjustedDates.endISO,
                         ratePerDay: getRatePerDay(),
-                        userId: u.id
+                        userId: u.id,
+                        attemptUpload: true, // Always attempt upload
+                        hasSignature: u.hasSignature
                     });
+
+                    // Inject required modules for PDF upload (always, if user has signature)
+                    if (u.hasSignature) {
+                        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+                        if (tab?.id) {
+                            log(`Injecting PDF upload modules for ${u.name}`);
+                            // Inject in order: personInfo -> uploadpdf
+                            await chrome.scripting.executeScript({
+                                target: { tabId: tab.id },
+                                files: ['modules/personInfo.js']
+                            });
+                            await chrome.scripting.executeScript({
+                                target: { tabId: tab.id },
+                                files: ['modules/uploadpdf.js']
+                            });
+                            log(`PDF upload modules injected for ${u.name}`);
+                        }
+                    }
 
                     // Inject billing module
                     await injectBillingModuleIIFE();
@@ -887,18 +884,30 @@
     };
 
     // Toggle buttons
-    btnUpload.onclick = () => {
-        const isActive = btnUpload.classList.toggle('active');
-        btnUpload.dataset.checked = isActive;
-        readOptsFromUI();
-    };
-    btnBilling.onclick = () => {
-        const isActive = btnBilling.classList.toggle('active');
-        btnBilling.dataset.checked = isActive;
+    // Upload and Billing button handlers removed - now always on together
+
+    // Handle custom delivery checkbox
+    chkCustomDelivery.onchange = () => {
+        if (chkCustomDelivery.checked) {
+            inpDeliv.style.display = '';
+            inpDeliv.value = inpDeliv.value || inpStart.value; // Default to start date if empty
+        } else {
+            inpDeliv.style.display = 'none';
+            inpDeliv.value = inpStart.value; // Reset to start date
+        }
         readOptsFromUI();
     };
 
-    [inpDeliv,inpStart,inpEnd].forEach(el=>el.onchange=()=>readOptsFromUI());
+    // When start date changes, update delivery date if not using custom
+    inpStart.onchange = () => {
+        if (!chkCustomDelivery.checked) {
+            inpDeliv.value = inpStart.value;
+        }
+        readOptsFromUI();
+    };
+
+    inpEnd.onchange = () => readOptsFromUI();
+    inpDeliv.onchange = () => readOptsFromUI();
 
     // Search
     inpSearch.value = q;

@@ -760,14 +760,15 @@
                 return false;
             }
 
-            console.log('✅ Attempting to click SUBMIT FOR REVIEW…', btn);
+            console.log('✅ Would click SUBMIT FOR REVIEW (disabled for testing)…', btn);
             const fireMouse = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-            // Comment out the following lines to test without clicking
-
+            // Commented out for testing - uncomment to actually submit:
+            /*
             fireMouse(btn, 'mousedown');
             fireMouse(btn, 'mouseup');
             fireMouse(btn, 'click');
             btn.focus?.();
+            */
 
             return true;
         };
@@ -776,14 +777,164 @@
             return; // Error already set in submit
         }
 
-        console.log('[enterBillingDetails] Done. Actual billing:', fmtMDY(billStart), '→', fmtMDY(billEnd), '$' + amount);
-        // Return the ACTUAL dates and amount that were entered (after adjustment)
-        window.__billingResult = {
-            ok: true,
-            actualStart: fmtMDY(billStart),
-            actualEnd: fmtMDY(billEnd),
-            actualAmount: amount
-        };
+        console.log('[enterBillingDetails] Form filled. Now handling PDF upload...');
+
+        // ===== PDF UPLOAD SECTION =====
+        // Check if upload is requested via billing inputs
+        const billingInputs = window.__BILLING_INPUTS__ || {};
+        const shouldUpload = billingInputs.attemptUpload && billingInputs.hasSignature;
+
+        if (shouldUpload) {
+            console.log('[enterBillingDetails] PDF upload requested - waiting for Attach Document button...');
+
+            // Wait for the "Attach Document" button to appear
+            let attachBtn = null;
+            for (let i = 0; i < 30; i++) {
+                attachBtn = document.querySelector('.payments-attachment-button') ||
+                           Array.from(document.querySelectorAll('button[id^="payments-attachment-button"]'))
+                               .find(b => (b.textContent || '').includes('Attach Document') && b.offsetParent !== null);
+                if (attachBtn) {
+                    console.log('[enterBillingDetails] Found "Attach Document" button after', i * 200, 'ms');
+                    break;
+                }
+                await sleep(200);
+            }
+
+            if (!attachBtn) {
+                console.warn('[enterBillingDetails] Attach Document button not found - skipping upload');
+                window.__billingResult = {
+                    ok: true,
+                    actualStart: fmtMDY(billStart),
+                    actualEnd: fmtMDY(billEnd),
+                    actualAmount: amount,
+                    uploadSkipped: true,
+                    uploadReason: 'Attach button not found'
+                };
+                return;
+            }
+
+            // Trigger the PDF generation and upload using direct approach (like Test Direct Upload)
+            console.log('[enterBillingDetails] Triggering PDF generation and upload...');
+
+            // Convert dates to ISO format for backend
+            const startISO = `${billStart.getFullYear()}-${String(billStart.getMonth() + 1).padStart(2, '0')}-${String(billStart.getDate()).padStart(2, '0')}`;
+            const endISO = `${billEnd.getFullYear()}-${String(billEnd.getMonth() + 1).padStart(2, '0')}-${String(billEnd.getDate()).padStart(2, '0')}`;
+
+            try {
+                // Check if personInfo and pdfUploader are available
+                if (!window.personInfo?.getPerson) {
+                    console.error('[enterBillingDetails] personInfo module not loaded');
+                    window.__billingResult = {
+                        ok: true,
+                        actualStart: fmtMDY(billStart),
+                        actualEnd: fmtMDY(billEnd),
+                        actualAmount: amount,
+                        uploadFailed: true,
+                        uploadError: 'personInfo module not loaded'
+                    };
+                    return;
+                }
+
+                if (!window.pdfUploader?.attachBytes) {
+                    console.error('[enterBillingDetails] pdfUploader module not loaded');
+                    window.__billingResult = {
+                        ok: true,
+                        actualStart: fmtMDY(billStart),
+                        actualEnd: fmtMDY(billEnd),
+                        actualAmount: amount,
+                        uploadFailed: true,
+                        uploadError: 'pdfUploader module not loaded'
+                    };
+                    return;
+                }
+
+                // Get person info
+                console.log('[enterBillingDetails] Reading person info...');
+                const personResult = await window.personInfo.getPerson({ retries: 4, delayMs: 250 });
+                if (!personResult?.ok) {
+                    throw new Error('Failed to read person info');
+                }
+                const person = personResult.person || {};
+                console.log('[enterBillingDetails] Person:', person.name);
+
+                // Generate PDF via backend
+                console.log('[enterBillingDetails] Generating PDF via backend...');
+                const backendUrl = "https://dietfantasy-nkw6.vercel.app/api/ext/attestation";
+                const payload = {
+                    name: person.name || "",
+                    phone: person.phone || "",
+                    address: person.address || "",
+                    deliveryDate: startISO,
+                    startDate: startISO,
+                    endDate: endISO,
+                    attestationDate: new Date().toISOString().slice(0, 10),
+                    userId: billingInputs.userId || null
+                };
+
+                const pdfResponse = await new Promise((resolve) => {
+                    chrome.runtime.sendMessage({ type: 'FETCH_ATTESTATION', backendUrl, payload }, resolve);
+                });
+
+                if (!pdfResponse?.ok) {
+                    throw new Error(pdfResponse?.error || 'PDF generation failed');
+                }
+
+                // Decode PDF bytes
+                let bytesU8;
+                if (pdfResponse.dataB64) {
+                    const bin = atob(pdfResponse.dataB64);
+                    bytesU8 = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) bytesU8[i] = bin.charCodeAt(i);
+                } else if (pdfResponse.data && typeof pdfResponse.data.byteLength === "number") {
+                    bytesU8 = new Uint8Array(pdfResponse.data);
+                } else {
+                    throw new Error('No PDF data received');
+                }
+
+                console.log('[enterBillingDetails] PDF generated:', bytesU8.length, 'bytes');
+
+                // Build filename
+                const cleanName = (person.name || "Attestation").replace(/\s+/g, " ").trim().replace(/[\\/:*?"<>|]/g, "");
+                const startDash = `${String(billStart.getMonth() + 1).padStart(2, '0')}-${String(billStart.getDate()).padStart(2, '0')}-${billStart.getFullYear()}`;
+                const endDash = `${String(billEnd.getMonth() + 1).padStart(2, '0')}-${String(billEnd.getDate()).padStart(2, '0')}-${billEnd.getFullYear()}`;
+                const filename = `${cleanName} ${startDash} - ${endDash}.pdf`;
+
+                console.log('[enterBillingDetails] Uploading PDF:', filename);
+
+                // Upload using pdfUploader (which handles the dialog)
+                const uploadResult = await window.pdfUploader.attachBytes(bytesU8, filename);
+
+                console.log('[enterBillingDetails] ✅ PDF uploaded successfully');
+                window.__billingResult = {
+                    ok: true,
+                    actualStart: fmtMDY(billStart),
+                    actualEnd: fmtMDY(billEnd),
+                    actualAmount: amount,
+                    uploadSuccess: true
+                };
+
+            } catch (uploadErr) {
+                console.error('[enterBillingDetails] Upload exception:', uploadErr);
+                window.__billingResult = {
+                    ok: true,
+                    actualStart: fmtMDY(billStart),
+                    actualEnd: fmtMDY(billEnd),
+                    actualAmount: amount,
+                    uploadFailed: true,
+                    uploadError: uploadErr?.message || String(uploadErr)
+                };
+            }
+        } else {
+            console.log('[enterBillingDetails] Upload not requested or no signature');
+            window.__billingResult = {
+                ok: true,
+                actualStart: fmtMDY(billStart),
+                actualEnd: fmtMDY(billEnd),
+                actualAmount: amount,
+                uploadSkipped: true,
+                uploadReason: shouldUpload ? 'No signature' : 'Upload not enabled'
+            };
+        }
     } catch (err) {
         console.error('[enterBillingDetails] Uncaught error:', err);
         window.__billingResult = { ok: false, error: 'Unexpected error: ' + (err.message || String(err)) };
