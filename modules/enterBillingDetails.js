@@ -733,24 +733,49 @@
         form.reportValidity?.();
 
         // ===== submit =====
-        const submit = () => {
-            console.log('[submit]');
+        const submit = async () => {
+            console.log('[submit] Starting submit process...');
             const id = 'fee-schedule-provided-service-post-note-btn';
-            const xp = '//*[@id="fee-schedule-provided-service-post-note-btn"]';
-            const btn =
-                document.getElementById(id) ||
-                document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            const xp = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[10]/div/button[2]';
+
+            // Try multiple methods to find the button
+            let btn = document.getElementById(id);
+            console.log('[submit] Button by ID:', !!btn);
+
             if (!btn) {
-                console.error('❌ Submit button not found.');
+                btn = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                console.log('[submit] Button by XPath:', !!btn);
+            }
+
+            if (!btn) {
+                // Try by aria-label
+                btn = document.querySelector('button[aria-label="SUBMIT FOR REVIEW"]');
+                console.log('[submit] Button by aria-label:', !!btn);
+            }
+
+            if (!btn) {
+                // Try by data-testid
+                btn = document.querySelector('button[data-testid="add-note-btn"]');
+                console.log('[submit] Button by data-testid:', !!btn);
+            }
+
+            if (!btn) {
+                console.error('❌ Submit button not found by any method.');
                 window.__billingResult = { ok: false, error: 'Submit button not found' };
                 return false;
             }
 
-            // Log button state for debugging
-            console.log('[enterBillingDetails] Submit button state:', {
+            // Log detailed button state
+            console.log('[submit] Button found! Details:', {
+                id: btn.id,
+                className: btn.className,
                 disabled: btn.disabled,
                 ariaDisabled: btn.getAttribute('aria-disabled'),
-                isVisible: shown(btn)
+                ariaLabel: btn.getAttribute('aria-label'),
+                textContent: btn.textContent,
+                isVisible: shown(btn),
+                offsetParent: !!btn.offsetParent,
+                boundingRect: btn.getBoundingClientRect()
             });
 
             // Check if button is disabled
@@ -760,24 +785,50 @@
                 return false;
             }
 
-            console.log('✅ Would click SUBMIT FOR REVIEW (disabled for testing)…', btn);
-            const fireMouse = (el, type) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-            // Commented out for testing - uncomment to actually submit:
-            /*
+            console.log('✅ Attempting to click SUBMIT FOR REVIEW…');
+
+            // Try multiple clicking methods
+            const fireMouse = (el, type) => {
+                const event = new MouseEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    clientX: el.getBoundingClientRect().left + 10,
+                    clientY: el.getBoundingClientRect().top + 10
+                });
+                const result = el.dispatchEvent(event);
+                console.log(`[submit] Fired ${type}, result:`, result);
+                return result;
+            };
+
+            // Scroll button into view
+            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            console.log('[submit] Scrolled button into view');
+
+            // Focus first
+            btn.focus();
+            console.log('[submit] Focused button');
+
+            // Wait a tiny bit before firing events
+            await sleep(50);
+
+            // Fire mouse events
+            fireMouse(btn, 'mouseover');
+            fireMouse(btn, 'mouseenter');
             fireMouse(btn, 'mousedown');
             fireMouse(btn, 'mouseup');
-            fireMouse(btn, 'click');
-            btn.focus?.();
-            */
+            const clickResult = fireMouse(btn, 'click');
+
+            // Also try native click
+            console.log('[submit] Trying native click...');
+            btn.click();
+
+            console.log('[submit] All click attempts completed, click event result:', clickResult);
 
             return true;
         };
 
-        if (!submit()) {
-            return; // Error already set in submit
-        }
-
-        console.log('[enterBillingDetails] Form filled. Now handling PDF upload...');
+        console.log('[enterBillingDetails] Form filled (submit will happen AFTER upload)...');
 
         // ===== PDF UPLOAD SECTION =====
         // Check if upload is requested via billing inputs
@@ -905,12 +956,32 @@
                 const uploadResult = await window.pdfUploader.attachBytes(bytesU8, filename);
 
                 console.log('[enterBillingDetails] ✅ PDF uploaded successfully');
+
+                // NOW submit the form AFTER successful upload
+                console.log('[enterBillingDetails] Now submitting form...');
+                await sleep(500); // Wait for upload dialog to close
+
+                const submitSuccess = await submit();
+                if (!submitSuccess) {
+                    console.error('[enterBillingDetails] Submit failed after upload');
+                    window.__billingResult = {
+                        ok: true,
+                        actualStart: fmtMDY(billStart),
+                        actualEnd: fmtMDY(billEnd),
+                        actualAmount: amount,
+                        uploadSuccess: true,
+                        submitFailed: true
+                    };
+                    return;
+                }
+
                 window.__billingResult = {
                     ok: true,
                     actualStart: fmtMDY(billStart),
                     actualEnd: fmtMDY(billEnd),
                     actualAmount: amount,
-                    uploadSuccess: true
+                    uploadSuccess: true,
+                    submitted: true
                 };
 
             } catch (uploadErr) {

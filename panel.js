@@ -273,6 +273,7 @@
         users = (Array.isArray(data) ? data : []).map(u => {
             let reason = null;
             if (u.bill === false) reason = "Billing disabled";
+            else if (!u.hasSignature) reason = "No signature";
             else if (!u.caseId && !u.clientId) reason = "Missing link: caseId & clientId";
             else if (!u.caseId) reason = "Missing link: caseId";
             else if (!u.clientId) reason = "Missing link: clientId";

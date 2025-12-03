@@ -19,6 +19,8 @@
         // Try to find auth elements
         let amountEl = document.querySelector('#basic-table-authorized-amount-value');
         let datesEl = document.querySelector('#basic-table-authorized-service-delivery-date-s-value');
+        // NEW: Also read "Date Opened" to use as billing start date
+        let dateOpenedEl = document.querySelector('#basic-table-date-opened-value');
 
         if (!amountEl) {
             amountEl = byXPath('//*[@id="basic-table-authorized-amount-value"]');
@@ -26,19 +28,29 @@
         if (!datesEl) {
             datesEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]/div/table/tbody/tr[3]/td[2]');
         }
+        if (!dateOpenedEl) {
+            // Backup XPath for Date Opened
+            dateOpenedEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[1]/div[1]/div/table/tbody/tr[3]/td[2]');
+        }
 
         console.log(`[USER PAGE FLOW] Auth check ${attempt}/${MAX_AUTH_ATTEMPTS}:`, {
             amountEl: !!amountEl,
-            datesEl: !!datesEl
+            datesEl: !!datesEl,
+            dateOpenedEl: !!dateOpenedEl
         });
 
-        if (amountEl && datesEl) {
+        if (amountEl && datesEl && dateOpenedEl) {
             const amountSpan = amountEl.querySelector('span');
             const amountText = amountSpan ? amountSpan.textContent : amountEl.textContent;
 
+            // Extract date from the <p> tag inside dateOpenedEl
+            const dateOpenedP = dateOpenedEl.querySelector('p.service-case-program-entry__text');
+            const dateOpenedText = dateOpenedP ? dateOpenedP.textContent.trim() : dateOpenedEl.textContent.trim();
+
             authInfo = {
                 authorizedAmount: amountText.trim(),
-                authorizedDates: datesEl.textContent.trim()
+                authorizedDates: datesEl.textContent.trim(),
+                dateOpened: dateOpenedText
             };
 
             console.log('[USER PAGE FLOW] ✅ Auth info loaded:', authInfo);
@@ -68,7 +80,7 @@
         return;
     }
 
-    // Parse authorized dates (MM/DD/YYYY - MM/DD/YYYY)
+    // Parse authorized dates (MM/DD/YYYY - MM/DD/YYYY) to get the END date
     const authDatesMatch = authInfo.authorizedDates.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
     if (!authDatesMatch) {
         const error = `Could not parse authorized dates: ${authInfo.authorizedDates}`;
@@ -77,8 +89,17 @@
         return;
     }
 
+    // Parse Date Opened (MM/DD/YYYY) - this REPLACES the authorized START date
+    const dateOpenedMatch = authInfo.dateOpened.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (!dateOpenedMatch) {
+        const error = `Could not parse Date Opened: ${authInfo.dateOpened}`;
+        console.error('[USER PAGE FLOW] ❌', error);
+        window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
+        return;
+    }
+
     // Parse dates in UTC to avoid timezone issues (YYYY, MM-1, DD)
-    const authStart = new Date(Date.UTC(+authDatesMatch[3], +authDatesMatch[1] - 1, +authDatesMatch[2]));
+    const dateOpened = new Date(Date.UTC(+dateOpenedMatch[3], +dateOpenedMatch[1] - 1, +dateOpenedMatch[2]));
     const authEnd = new Date(Date.UTC(+authDatesMatch[6], +authDatesMatch[4] - 1, +authDatesMatch[5]));
 
     // Parse requested ISO dates in UTC
@@ -95,18 +116,20 @@
             endParsed: reqEnd.toISOString().split('T')[0]
         },
         authorized: {
-            raw: authInfo.authorizedDates,
-            startParsed: authStart.toISOString().split('T')[0],
-            endParsed: authEnd.toISOString().split('T')[0]
+            dateOpened: authInfo.dateOpened,
+            dateOpenedParsed: dateOpened.toISOString().split('T')[0],
+            authEndRaw: authInfo.authorizedDates.split(' - ')[1],
+            authEndParsed: authEnd.toISOString().split('T')[0]
         }
     });
 
-    // Calculate intersection (adjusted dates)
-    const adjustedStart = reqStart > authStart ? reqStart : authStart;
+    // Calculate intersection using Date Opened as start, authorized end as end
+    // Same logic as before, but authStart is replaced with dateOpened
+    const adjustedStart = reqStart > dateOpened ? reqStart : dateOpened;
     const adjustedEnd = reqEnd < authEnd ? reqEnd : authEnd;
 
     if (adjustedEnd < adjustedStart) {
-        const error = 'No overlap between requested and authorized dates';
+        const error = 'No overlap between requested dates and authorized range (Date Opened to Auth End)';
         console.error('[USER PAGE FLOW] ❌', error);
         window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
         return;
@@ -145,14 +168,15 @@
     if (wasAdjusted) {
         console.log('[USER PAGE FLOW] ⚠️ DATES WERE ADJUSTED:');
         console.log('  Requested:', reqStartISO, '→', reqEndISO);
-        console.log('  Authorized:', authStart.toISOString().split('T')[0], '→', authEnd.toISOString().split('T')[0]);
+        console.log('  Date Opened:', dateOpened.toISOString().split('T')[0]);
+        console.log('  Auth End:', authEnd.toISOString().split('T')[0]);
         console.log('  Adjusted (intersection):', adjustedDates.startISO, '→', adjustedDates.endISO);
         console.log('  Reason:', {
-            startChanged: reqStartISO !== adjustedDates.startISO ? `${reqStartISO} → ${adjustedDates.startISO} (outside auth range)` : 'no change',
-            endChanged: reqEndISO !== adjustedDates.endISO ? `${reqEndISO} → ${adjustedDates.endISO} (outside auth range)` : 'no change'
+            startChanged: reqStartISO !== adjustedDates.startISO ? `${reqStartISO} → ${adjustedDates.startISO} (before Date Opened)` : 'no change',
+            endChanged: reqEndISO !== adjustedDates.endISO ? `${reqEndISO} → ${adjustedDates.endISO} (after auth end)` : 'no change'
         });
     } else {
-        console.log('[USER PAGE FLOW] ✅ No adjustment needed - requested dates are within authorized range');
+        console.log('[USER PAGE FLOW] ✅ No adjustment needed - requested dates are within Date Opened to Auth End range');
     }
 
     console.log('[USER PAGE FLOW] ✅ Final adjusted dates:', adjustedDates);
