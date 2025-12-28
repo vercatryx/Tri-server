@@ -53,6 +53,7 @@
 
     // Auto-run flags
     let isRunning=false, isPaused=false, stopRequested=false, lockedTabId=null, duplicateFoundInBilling = false;
+    let consecutiveAuthFailures = 0; // Track consecutive auth failures
 
     // Listen for duplicate found message from content script
     chrome.runtime.onMessage.addListener((msg) => {
@@ -67,13 +68,27 @@
     const stamp=()=>new Date().toLocaleTimeString();
     // const log=(line,obj)=>{ const msg=`[${stamp()}] ${line}${obj?(" "+JSON.stringify(obj)):""}\n`; logEl.textContent+=msg; logEl.scrollTop=logEl.scrollHeight; const c=localStorage.getItem(LOG_KEY)||""; localStorage.setItem(LOG_KEY,c+msg); };
     const log = (line, obj) => {
-        const msg = `\n[${stamp()}] ${line}${obj ? " " + JSON.stringify(obj, null, 2) : ""}`;
+        // Ensure we start on a new line
+        const currentContent = logEl.textContent || "";
+        const needsNewline = currentContent.length > 0 && !currentContent.endsWith('\n');
+        const prefix = needsNewline ? '\n' : '';
+        
+        // Format object as single-line JSON to keep it on one line
+        const objStr = obj ? " " + JSON.stringify(obj) : "";
+        const msg = `${prefix}[${stamp()}] ${line}${objStr}\n`;
         logEl.textContent += msg;
         logEl.scrollTop = logEl.scrollHeight;
         const c = localStorage.getItem(LOG_KEY) || "";
         localStorage.setItem(LOG_KEY, c + msg);
     };
-    const restoreLog=()=>{ const c=localStorage.getItem(LOG_KEY); if(c){ logEl.textContent=c; logEl.scrollTop=logEl.scrollHeight; } };
+    const restoreLog=()=>{ 
+        const c=localStorage.getItem(LOG_KEY); 
+        if(c){ 
+            // Ensure restored logs end with newline
+            logEl.textContent = c.endsWith('\n') ? c : c + '\n';
+            logEl.scrollTop=logEl.scrollHeight; 
+        } 
+    };
 
     const defaultOpts=()=>{ const t=new Date().toISOString().slice(0,10); return { attemptUpload:true, attemptBilling:true, dates:{ delivery:t, start:t, end:t } }; };
     const loadOpts=()=>{ try{ const o=JSON.parse(localStorage.getItem(OPTS_KEY)||""); return o && o.dates ? o : defaultOpts(); } catch{ return defaultOpts(); } };
@@ -405,34 +420,152 @@
         buildFiltered(); renderList();
     }
 
-    async function processUser(u, opts) {
-        if (u.invalid) { mark(u, "bad", u.invalidReason || "Invalid"); return; }
-        if (u.skip)   { mark(u, "warn", "Skipped by user"); return; }
+    // Helper function to perform aggressive pre-login (clear + login before each user)
+    async function performPreLogin() {
+        log(`Performing pre-login: clearing cookies and browsing data...`);
+        
+        // Add debugging to browser console
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (tab?.id) {
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    console.log('[DF EXTENSION] 🔄 Starting pre-login sequence...');
+                }
+            });
+        }
+        
+        // Step 1: Clear cookies and browsing data
+        log(`Clearing cookies and browsing data...`);
+        const clearResult = await sendBg({ type: "DF_CLEAR_COOKIES_AND_DATA" });
+        if (!clearResult?.ok) {
+            log(`Warning: Failed to clear cookies: ${clearResult?.error || 'unknown'}`);
+            if (tab?.id) {
+                await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: (err) => {
+                        console.error('[DF EXTENSION] ❌ Failed to clear cookies:', err);
+                    },
+                    args: [clearResult?.error || 'unknown']
+                });
+            }
+        } else {
+            log(`✓ Cookies and browsing data cleared`);
+            if (tab?.id) {
+                await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: () => {
+                        console.log('[DF EXTENSION] ✓ Cookies and browsing data cleared');
+                    }
+                });
+            }
+        }
 
-        log(`Processing user: ${u.name}`, { id: u.id });
+        // Step 2: Perform login sequence
+        log(`Starting login sequence...`);
+        if (tab?.id) {
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    console.log('[DF EXTENSION] 🔐 Starting login sequence...');
+                }
+            });
+        }
+        
+        const creds = await loadUniteusCredentials();
+        const loginResult = await sendBg({
+            type: "DF_DO_LOGIN",
+            email: creds.email || "orit@dietfantasy.com",
+            password: creds.password || "Diet1234fantasy"
+        });
 
+        if (!loginResult?.ok) {
+            log(`❌ Login failed: ${loginResult?.error || 'unknown'}`);
+            if (tab?.id) {
+                await chrome.scripting.executeScript({
+                    target: { tabId: tab.id },
+                    func: (err) => {
+                        console.error('[DF EXTENSION] ❌ Login failed:', err);
+                    },
+                    args: [loginResult?.error || 'unknown']
+                });
+            }
+            return { ok: false, error: `Login failed: ${loginResult?.error || 'unknown'}` };
+        }
+
+        log(`✓ Login successful, waiting 3 seconds...`);
+        if (tab?.id) {
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    console.log('[DF EXTENSION] ✓ Login successful, waiting 3 seconds...');
+                }
+            });
+        }
+        await sleep(3000);
+        
+        if (tab?.id) {
+            await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: () => {
+                    console.log('[DF EXTENSION] ✓ Pre-login sequence complete');
+                }
+            });
+        }
+        
+        return { ok: true };
+    }
+
+    // Helper function to attempt user page flow with retry and relogin
+    async function attemptUserPageFlow(u, opts, maxReloginAttempts = 2) {
         const url = UNITE_URL(u.caseId, u.clientId);
-        log(`Navigating → ${u.name}`, { url });
+        let lastError = null;
 
-        const nav = await sendBg({ type:"DF_NAVIGATE", url, readyXPath: READY_XP });
-        if (!nav?.ok) { mark(u, "bad", `Navigate failed: ${nav?.error||"unknown"}`); return; }
+        for (let reloginAttempt = 0; reloginAttempt <= maxReloginAttempts; reloginAttempt++) {
+            if (reloginAttempt > 0) {
+                log(`Retry attempt ${reloginAttempt}/${maxReloginAttempts} for ${u.name} - performing relogin...`);
 
-        let anyBad=false, anyWarn=false;
-        let reasons=[];
+                // Perform pre-login
+                const preLoginResult = await performPreLogin();
+                if (!preLoginResult.ok) {
+                    lastError = preLoginResult.error;
+                    continue;
+                }
 
-        // ===== NEW CLEAN FLOW: Inject flow module and wait for completion =====
-        try {
-            log(`Starting user page flow for ${u.name}`);
+                // Reload the user's page
+                log(`Reloading user page: ${u.name}`);
+                const reloadResult = await sendBg({ type: "DF_NAVIGATE", url, readyXPath: READY_XP });
+                if (!reloadResult?.ok) {
+                    log(`Reload failed: ${reloadResult?.error || 'unknown'}`);
+                    lastError = `Reload failed: ${reloadResult?.error || 'unknown'}`;
+                    continue;
+                }
+            } else {
+                // First attempt - just navigate (pre-login already done before this function)
+                log(`Navigating → ${u.name}`, { url });
+                const nav = await sendBg({ type: "DF_NAVIGATE", url, readyXPath: READY_XP });
+                if (!nav?.ok) {
+                    return { ok: false, error: `Navigate failed: ${nav?.error || "unknown"}` };
+                }
+            }
+
+            // Now try to get auth elements
+            log(`Attempting to get auth elements for ${u.name} (attempt ${reloginAttempt + 1})...`);
 
             // Clear previous flow result
             await sendBg({
                 type: "DF_EXEC_SCRIPT",
-                code: "delete window.__USER_PAGE_FLOW_RESULT__; delete window.__USER_PAGE_INPUTS__; delete window.__ADJUSTED_DATES__;"
+                code: "delete window.__USER_PAGE_FLOW_RESULT__; delete window.__USER_PAGE_INPUTS__; delete window.__ADJUSTED_DATES__; delete window.__USER_PAGE_FLOW_PROGRESS__;"
             });
 
             // Set inputs for the flow
+            const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+            if (!tab?.id) {
+                return { ok: false, error: "No active tab" };
+            }
+
             await chrome.scripting.executeScript({
-                target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                target: { tabId: tab.id },
                 func: (inputs) => {
                     window.__USER_PAGE_INPUTS__ = inputs;
                 },
@@ -448,13 +581,11 @@
 
             // Inject the flow module
             await chrome.scripting.executeScript({
-                target: { tabId: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0].id },
+                target: { tabId: tab.id },
                 files: ['modules/userPageFlow.js']
             });
 
-            log(`User page flow injected for ${u.name}, waiting for completion...`);
-
-            // Poll for flow completion (up to 30 seconds)
+            // Poll for flow completion with progress tracking
             let flowResult = null;
             let pollAttempts = 0;
             const maxPollAttempts = 30;
@@ -463,6 +594,17 @@
                 await sleep(1000);
                 pollAttempts++;
 
+                // Check for progress updates
+                const progressResult = await sendBg({
+                    type: "DF_EXEC_SCRIPT",
+                    code: "window.__USER_PAGE_FLOW_PROGRESS__"
+                });
+                if (progressResult?.result && progressResult.result.step) {
+                    const progress = progressResult.result;
+                    log(`[${u.name}] ${progress.step}`, progress);
+                }
+
+                // Check for final result
                 const result = await sendBg({
                     type: "DF_EXEC_SCRIPT",
                     code: "window.__USER_PAGE_FLOW_RESULT__"
@@ -476,18 +618,87 @@
             }
 
             if (!flowResult) {
-                anyBad = true;
-                reasons.push('Flow timeout - no response after 30s');
-                mark(u, "bad", reasons.join(" · "));
-                return;
+                lastError = 'Flow timeout - no response after 30s';
+                log(`Flow timeout for ${u.name}, will retry with relogin if attempts remaining`);
+                continue; // Try relogin if we have attempts left
             }
 
             if (!flowResult.ok) {
+                // Check if it needs relogin
+                if (flowResult.needsRelogin && reloginAttempt < maxReloginAttempts) {
+                    lastError = flowResult.error || 'Auth elements not found';
+                    log(`Auth elements not found for ${u.name}, will retry with relogin`);
+                    continue; // Try relogin
+                } else {
+                    return { ok: false, error: flowResult.error || 'Flow failed' };
+                }
+            }
+
+            // Success! Reset consecutive failures counter
+            return { ok: true, flowResult };
+        }
+
+        // All relogin attempts exhausted - don't increment here, let caller decide
+        return { ok: false, error: lastError || 'Auth elements not found after all retry attempts', exhausted: true };
+    }
+
+    async function processUser(u, opts) {
+        if (u.invalid) { mark(u, "bad", u.invalidReason || "Invalid"); return; }
+        if (u.skip)   { mark(u, "warn", "Skipped by user"); return; }
+
+        log(`Processing user: ${u.name}`, { id: u.id });
+
+        let anyBad=false, anyWarn=false;
+        let reasons=[];
+
+        // ===== AGGRESSIVE PRE-LOGIN: Clear cookies, login, wait before each user =====
+        log(`[${u.name}] Performing pre-login sequence...`);
+        const preLoginResult = await performPreLogin();
+        if (!preLoginResult.ok) {
+            anyBad = true;
+            reasons.push(`Pre-login failed: ${preLoginResult.error}`);
+            mark(u, "bad", reasons.join(" · "));
+            consecutiveAuthFailures++;
+            if (consecutiveAuthFailures >= 2) {
+                log(`⚠️ Pausing run: 2 consecutive pre-login failures detected`);
+                isPaused = true;
+                btnPause.textContent = "Resume";
+            }
+            return;
+        }
+
+        // ===== NEW CLEAN FLOW: Attempt with retry and relogin =====
+        try {
+            const flowAttempt = await attemptUserPageFlow(u, opts, 2); // Max 2 relogin attempts
+
+            if (!flowAttempt.ok) {
                 anyBad = true;
-                reasons.push(`Flow error: ${flowResult.error}`);
+                reasons.push(flowAttempt.error || 'Flow failed');
+                
+                // Increment consecutive failures if auth elements were not found (exhausted all retries)
+                if (flowAttempt.exhausted) {
+                    consecutiveAuthFailures++;
+                    log(`Auth failure for ${u.name} (consecutive: ${consecutiveAuthFailures})`);
+                } else {
+                    // Reset on other types of failures
+                    consecutiveAuthFailures = 0;
+                }
+                
                 mark(u, "bad", reasons.join(" · "));
+                
+                // Check if we should pause after 2 consecutive failures
+                if (consecutiveAuthFailures >= 2) {
+                    log(`⚠️ Pausing run: 2 consecutive auth failures detected`);
+                    isPaused = true;
+                    btnPause.textContent = "Resume";
+                }
                 return;
             }
+
+            const flowResult = flowAttempt.flowResult;
+
+            // Success! Reset consecutive failures counter
+            consecutiveAuthFailures = 0;
 
             // Check if duplicate was found
             if (flowResult.duplicate) {
@@ -687,13 +898,26 @@
             }
         }
 
-        if (anyBad) mark(u, "bad", reasons.join(" · ") || "One or more steps failed");
-        else if (anyWarn) mark(u, "warn", reasons.join(" · ") || "Upload skipped (no signature)");
-        else mark(u, "ok");
+        if (anyBad) {
+            mark(u, "bad", reasons.join(" · ") || "One or more steps failed");
+        } else if (anyWarn) {
+            mark(u, "warn", reasons.join(" · ") || "Upload skipped (no signature)");
+            // Reset consecutive failures on success (even with warnings)
+            consecutiveAuthFailures = 0;
+        } else {
+            mark(u, "ok");
+            // Reset consecutive failures on success
+            consecutiveAuthFailures = 0;
+        }
     }
 
     async function runAuto() {
         if (isRunning) return;
+        
+        // Clear logs when starting
+        logEl.textContent = "";
+        localStorage.removeItem(LOG_KEY);
+        
         setRunningUI(true);
         isPaused=false; stopRequested=false;
 

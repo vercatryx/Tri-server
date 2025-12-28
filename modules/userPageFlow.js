@@ -1,19 +1,27 @@
 // modules/userPageFlow.js
 // Clean, sequential flow for processing a user page
+// Now reports progress for better tracking
 
 (async () => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const byXPath = (xp) =>
         document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue || null;
 
+    // Progress reporting
+    const reportProgress = (step, details = {}) => {
+        window.__USER_PAGE_FLOW_PROGRESS__ = { step, ...details, timestamp: Date.now() };
+        console.log(`[USER PAGE FLOW] ${step}:`, details);
+    };
+
     // ===== STEP 1: Wait for auth elements (up to 20 tries, 1.2s between) =====
-    console.log('[USER PAGE FLOW] Step 1: Waiting for auth elements...');
+    reportProgress('step1_start', { message: 'Waiting for auth elements...' });
 
     let authInfo = null;
     const MAX_AUTH_ATTEMPTS = 20;
     const AUTH_RETRY_DELAY_MS = 1200;
 
     for (let attempt = 1; attempt <= MAX_AUTH_ATTEMPTS; attempt++) {
+        reportProgress('step1_checking', { attempt, maxAttempts: MAX_AUTH_ATTEMPTS });
         await sleep(AUTH_RETRY_DELAY_MS);
 
         // Try to find auth elements
@@ -33,11 +41,12 @@
             dateOpenedEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[1]/div[1]/div/table/tbody/tr[3]/td[2]');
         }
 
-        console.log(`[USER PAGE FLOW] Auth check ${attempt}/${MAX_AUTH_ATTEMPTS}:`, {
+        const found = {
             amountEl: !!amountEl,
             datesEl: !!datesEl,
             dateOpenedEl: !!dateOpenedEl
-        });
+        };
+        reportProgress('step1_check_result', { attempt, found });
 
         if (amountEl && datesEl && dateOpenedEl) {
             const amountSpan = amountEl.querySelector('span');
@@ -53,20 +62,24 @@
                 dateOpened: dateOpenedText
             };
 
-            console.log('[USER PAGE FLOW] ✅ Auth info loaded:', authInfo);
+            reportProgress('step1_success', { authInfo });
             break;
         }
     }
 
     if (!authInfo) {
         const error = 'Auth elements not found after 20 attempts';
-        console.error('[USER PAGE FLOW] ❌', error);
-        window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
+        reportProgress('step1_failed', { error });
+        window.__USER_PAGE_FLOW_RESULT__ = { 
+            ok: false, 
+            error,
+            needsRelogin: true // Signal that relogin might help
+        };
         return;
     }
 
     // ===== STEP 2: Calculate adjusted dates from auth + requested =====
-    console.log('[USER PAGE FLOW] Step 2: Calculating adjusted dates...');
+    reportProgress('step2_start', { message: 'Calculating adjusted dates...' });
 
     const inputs = window.__USER_PAGE_INPUTS__ || {};
     const reqStartISO = inputs.startISO || '';
@@ -75,7 +88,7 @@
 
     if (!reqStartISO || !reqEndISO) {
         const error = 'Missing requested start/end dates';
-        console.error('[USER PAGE FLOW] ❌', error);
+        reportProgress('step2_failed', { error });
         window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
         return;
     }
@@ -84,7 +97,7 @@
     const authDatesMatch = authInfo.authorizedDates.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
     if (!authDatesMatch) {
         const error = `Could not parse authorized dates: ${authInfo.authorizedDates}`;
-        console.error('[USER PAGE FLOW] ❌', error);
+        reportProgress('step2_failed', { error });
         window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
         return;
     }
@@ -93,7 +106,7 @@
     const dateOpenedMatch = authInfo.dateOpened.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
     if (!dateOpenedMatch) {
         const error = `Could not parse Date Opened: ${authInfo.dateOpened}`;
-        console.error('[USER PAGE FLOW] ❌', error);
+        reportProgress('step2_failed', { error });
         window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
         return;
     }
@@ -108,7 +121,7 @@
     const reqStart = new Date(Date.UTC(reqY, reqM - 1, reqD));
     const reqEnd = new Date(Date.UTC(reqEndY, reqEndM - 1, reqEndD));
 
-    console.log('[USER PAGE FLOW] 📅 Date comparison:', {
+    reportProgress('step2_date_comparison', {
         requested: {
             start: reqStartISO,
             end: reqEndISO,
@@ -130,7 +143,7 @@
 
     if (adjustedEnd < adjustedStart) {
         const error = 'No overlap between requested dates and authorized range (Date Opened to Auth End)';
-        console.error('[USER PAGE FLOW] ❌', error);
+        reportProgress('step2_failed', { error });
         window.__USER_PAGE_FLOW_RESULT__ = { ok: false, error };
         return;
     }
@@ -166,26 +179,23 @@
     // Log adjustment details
     const wasAdjusted = (reqStartISO !== adjustedDates.startISO) || (reqEndISO !== adjustedDates.endISO);
     if (wasAdjusted) {
-        console.log('[USER PAGE FLOW] ⚠️ DATES WERE ADJUSTED:');
-        console.log('  Requested:', reqStartISO, '→', reqEndISO);
-        console.log('  Date Opened:', dateOpened.toISOString().split('T')[0]);
-        console.log('  Auth End:', authEnd.toISOString().split('T')[0]);
-        console.log('  Adjusted (intersection):', adjustedDates.startISO, '→', adjustedDates.endISO);
-        console.log('  Reason:', {
-            startChanged: reqStartISO !== adjustedDates.startISO ? `${reqStartISO} → ${adjustedDates.startISO} (before Date Opened)` : 'no change',
-            endChanged: reqEndISO !== adjustedDates.endISO ? `${reqEndISO} → ${adjustedDates.endISO} (after auth end)` : 'no change'
+        reportProgress('step2_dates_adjusted', {
+            requested: { start: reqStartISO, end: reqEndISO },
+            adjusted: { start: adjustedDates.startISO, end: adjustedDates.endISO },
+            dateOpened: dateOpened.toISOString().split('T')[0],
+            authEnd: authEnd.toISOString().split('T')[0]
         });
     } else {
-        console.log('[USER PAGE FLOW] ✅ No adjustment needed - requested dates are within Date Opened to Auth End range');
+        reportProgress('step2_no_adjustment_needed', { message: 'Requested dates are within authorized range' });
     }
 
-    console.log('[USER PAGE FLOW] ✅ Final adjusted dates:', adjustedDates);
+    reportProgress('step2_success', { adjustedDates });
 
     // Store adjusted dates for other modules to use
     window.__ADJUSTED_DATES__ = adjustedDates;
 
     // ===== STEP 3: Check for duplicates (with adjusted dates only) =====
-    console.log('[USER PAGE FLOW] Step 3: Checking for duplicates...');
+    reportProgress('step3_start', { message: 'Checking for duplicates...' });
 
     const checkDuplicate = (startMDY, endMDY, amount) => {
         const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim();
@@ -210,7 +220,7 @@
         const wantCents = cents(amount);
 
         const cards = Array.from(document.querySelectorAll('.fee-schedule-provided-service-card'));
-        console.log(`[USER PAGE FLOW] Checking ${cards.length} invoice cards for duplicates`);
+        reportProgress('step3_checking_cards', { cardCount: cards.length });
 
         for (const card of cards) {
             const amtEl = card.querySelector('[data-test-element="unit-amount-value"]');
@@ -236,7 +246,7 @@
             if (Number.isFinite(cardCents) && s && e &&
                 cardCents === wantCents &&
                 sameDay(s, start) && sameDay(e, end)) {
-                console.log('[USER PAGE FLOW] ✅ Duplicate found!', { startMDY, endMDY, amount });
+                reportProgress('step3_duplicate_found', { startMDY, endMDY, amount });
                 return true;
             }
         }
@@ -247,36 +257,40 @@
     const isDuplicate = checkDuplicate(adjustedDates.startMDY, adjustedDates.endMDY, adjustedDates.amount);
 
     if (isDuplicate) {
-        console.log('[USER PAGE FLOW] ⚠️ Duplicate invoice detected - will upload but skip billing');
+        reportProgress('step3_duplicate_detected', { message: 'Will upload but skip billing' });
         // Don't return early - continue with upload but skip billing
     } else {
-        console.log('[USER PAGE FLOW] ✅ No duplicate found - proceeding with upload and billing');
+        reportProgress('step3_no_duplicate', { message: 'Proceeding with upload and billing' });
     }
 
     // ===== STEP 4: Upload (if requested, with adjusted dates only) =====
     if (inputs.attemptUpload && inputs.hasSignature) {
-        console.log('[USER PAGE FLOW] Step 4: Starting upload with adjusted dates...');
-
+        reportProgress('step4_upload_pending', { message: 'Upload will use adjusted dates' });
         // Upload module will read from window.__ADJUSTED_DATES__
         window.__UPLOAD_PENDING__ = true;
     } else {
-        console.log('[USER PAGE FLOW] Step 4: Upload skipped');
+        reportProgress('step4_upload_skipped', { reason: !inputs.attemptUpload ? 'Upload not requested' : 'No signature' });
     }
 
     // ===== STEP 5: Billing (if requested, with adjusted dates only) =====
     // Skip billing if duplicate is found
     if (inputs.attemptBilling && !isDuplicate) {
-        console.log('[USER PAGE FLOW] Step 5: Billing will use adjusted dates...');
-
+        reportProgress('step5_billing_pending', { message: 'Billing will use adjusted dates' });
         // Billing module will read from window.__ADJUSTED_DATES__
         window.__BILLING_PENDING__ = true;
     } else {
         if (isDuplicate) {
-            console.log('[USER PAGE FLOW] Step 5: Billing skipped due to duplicate');
+            reportProgress('step5_billing_skipped', { reason: 'Duplicate detected' });
         } else {
-            console.log('[USER PAGE FLOW] Step 5: Billing skipped');
+            reportProgress('step5_billing_skipped', { reason: 'Billing not requested' });
         }
     }
+
+    reportProgress('flow_completed', { 
+        duplicate: isDuplicate,
+        uploadPending: !!window.__UPLOAD_PENDING__,
+        billingPending: !!window.__BILLING_PENDING__
+    });
 
     window.__USER_PAGE_FLOW_RESULT__ = {
         ok: true,
@@ -286,6 +300,4 @@
         billingPending: !!window.__BILLING_PENDING__,
         message: isDuplicate ? 'Duplicate invoice found - uploaded but skipped billing' : null
     };
-
-    console.log('[USER PAGE FLOW] ✅ Flow completed:', window.__USER_PAGE_FLOW_RESULT__);
 })();

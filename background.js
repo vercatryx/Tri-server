@@ -165,6 +165,9 @@ async function setRunOptsOnPage(opts, tabIdHint, sender) {
     return { ok: true };
 }
 
+// ===================== Helper: sleep =====================
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 // ===================== Bytes helper for dummy =====================
 function ab2b64(buf) {
     const bytes = new Uint8Array(buf);
@@ -525,6 +528,141 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 console.log('[background.js] Script results:', results);
                 sendResponse({ ok: true, result: results?.[0]?.result });
                 return;
+            }
+
+            // --- Cookie and browsing data deletion ---
+            if (msg.type === "DF_CLEAR_COOKIES_AND_DATA") {
+                try {
+                    // Clear browsing data for UniteUs domains (this includes cookies, cache, localStorage, sessionStorage)
+                    try {
+                        await chrome.browsingData.remove({
+                            "origins": [
+                                "https://app.uniteus.io",
+                                "https://app.auth.uniteus.io",
+                                "https://uniteus.io"
+                            ]
+                        }, {
+                            "cookies": true,
+                            "cache": true,
+                            "localStorage": true,
+                            "sessionStorage": true
+                        });
+                        console.log("[background] Cleared browsing data for UniteUs domains");
+                    } catch (e) {
+                        console.warn("[background] Failed to clear browsing data:", e);
+                    }
+                    
+                    // Also try to clear cookies directly for the domains
+                    try {
+                        const domains = ["app.uniteus.io", "app.auth.uniteus.io", "uniteus.io"];
+                        for (const domain of domains) {
+                            const cookies = await chrome.cookies.getAll({ domain: domain });
+                            for (const cookie of cookies) {
+                                try {
+                                    const cookieUrl = `${cookie.secure ? 'https' : 'http'}://${cookie.domain}${cookie.path || '/'}`;
+                                    await chrome.cookies.remove({
+                                        url: cookieUrl,
+                                        name: cookie.name
+                                    });
+                                } catch (e) {
+                                    // Ignore individual cookie removal errors
+                                }
+                            }
+                        }
+                        console.log("[background] Cleared cookies for UniteUs domains");
+                    } catch (e) {
+                        console.warn("[background] Failed to clear cookies directly:", e);
+                    }
+                    
+                    sendResponse({ ok: true });
+                    return;
+                } catch (e) {
+                    sendResponse({ ok: false, error: e?.message || String(e) });
+                    return;
+                }
+            }
+
+            // --- Programmatic login sequence ---
+            if (msg.type === "DF_DO_LOGIN") {
+                try {
+                    const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                    const email = msg.email || "orit@dietfantasy.com";
+                    const password = msg.password || "Diet1234fantasy";
+                    
+                    // Navigate to auth page
+                    await chrome.tabs.update(tabId, { url: 'https://app.auth.uniteus.io/' });
+                    await waitForTabComplete(tabId, 30000);
+                    
+                    // Inject loginFlow.js
+                    await chrome.scripting.executeScript({
+                        target: { tabId },
+                        files: ['modules/loginFlow.js']
+                    });
+                    
+                    // Send email
+                    await chrome.tabs.sendMessage(tabId, {
+                        type: 'LOGIN_FLOW_SETTINGS',
+                        email: email
+                    });
+                    
+                    // Wait for redirect to password page
+                    let passwordPageReached = false;
+                    const maxWait = 15000;
+                    const startTime = Date.now();
+                    
+                    while (Date.now() - startTime < maxWait && !passwordPageReached) {
+                        await sleep(500);
+                        const tab = await chrome.tabs.get(tabId);
+                        if (tab.url && tab.url.includes('app.auth.uniteus.io/login')) {
+                            passwordPageReached = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!passwordPageReached) {
+                        sendResponse({ ok: false, error: 'Password page not reached' });
+                        return;
+                    }
+                    
+                    // Wait for page to load
+                    await waitForTabComplete(tabId, 30000);
+                    await sleep(500);
+                    
+                    // Inject step2Patch.js
+                    await chrome.scripting.executeScript({
+                        target: { tabId },
+                        files: ['modules/step2Patch.js']
+                    });
+                    
+                    // Send password
+                    await chrome.tabs.sendMessage(tabId, {
+                        type: 'STEP2_SETTINGS',
+                        email: email,
+                        password: password,
+                        autoSubmit: true
+                    });
+                    
+                    // Wait for login to complete (redirect to dashboard)
+                    let loginComplete = false;
+                    const loginMaxWait = 20000;
+                    const loginStartTime = Date.now();
+                    
+                    while (Date.now() - loginStartTime < loginMaxWait && !loginComplete) {
+                        await sleep(500);
+                        const tab = await chrome.tabs.get(tabId);
+                        if (tab.url && (tab.url.includes('app.uniteus.io/dashboard') || !tab.url.includes('app.auth.uniteus.io'))) {
+                            loginComplete = true;
+                            break;
+                        }
+                    }
+                    
+                    await waitForTabComplete(tabId, 30000);
+                    sendResponse({ ok: true, loginComplete });
+                    return;
+                } catch (e) {
+                    sendResponse({ ok: false, error: e?.message || String(e) });
+                    return;
+                }
             }
 
             // --- Billing page verification hooks ---

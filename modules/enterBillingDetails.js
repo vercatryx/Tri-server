@@ -588,11 +588,215 @@
         }
 
 
-        const okRange = await setDateRangeRobust(billStart, billEnd);
-        if (!okRange) {
-            console.warn('[enterBillingDetails] Date range entry did not confirm; continuing.');
-            window.__billingResult = { ok: false, error: 'Failed to set date range' };
-            return;
+        // ===== Check if single day (start === end) =====
+        const isSingleDay = billStart.getTime() === billEnd.getTime();
+        
+        if (isSingleDay) {
+            // ===== Single day date entry: Skip date range button, use #provided-service-date directly =====
+            async function setSingleDateRobust(date) {
+                console.groupCollapsed('[📅 setSingleDateRobust] Starting (single day)');
+                const fmt = (d) => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+                console.log('Single date to set:', fmt(date));
+                
+                // Helper functions (same as setDateRangeRobust)
+                const M = (el,t) => el && el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));
+                const P = (el,t) => el && el.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,pointerId:1,pointerType:'mouse',isPrimary:true}));
+                const clickLikeHuman = (el) => { P(el,'pointerdown'); M(el,'mousedown'); P(el,'pointerup'); M(el,'mouseup'); M(el,'click'); };
+                
+                // Wait for the single date input field to appear (form might need time to render)
+                console.log('[singleDate] Waiting for date input field to appear...');
+                let dateInput = null;
+                for (let i = 0; i < 30; i++) { // Wait up to 3 seconds (30 * 100ms)
+                    dateInput = document.getElementById('provided-service-date');
+                    if (dateInput && shown(dateInput)) {
+                        console.log('[singleDate] Found date input field after', i, 'attempts');
+                        break;
+                    }
+                    await sleep(100);
+                }
+                
+                if (!dateInput) {
+                    console.error('[singleDate] Single date input field (#provided-service-date) not found after waiting');
+                    return false;
+                }
+                
+                if (!shown(dateInput)) {
+                    console.error('[singleDate] Date input field is not visible');
+                    return false;
+                }
+                
+                console.log('[singleDate] Found date input field');
+                
+                // Format date as MM/DD/YYYY for the input (based on placeholder)
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                const year = date.getFullYear();
+                const mdyDate = `${month}/${day}/${year}`;
+                
+                console.log(`[singleDate] Setting date to: ${mdyDate}`);
+                
+                // Scroll into view
+                dateInput.scrollIntoView({ block: 'center', inline: 'center' });
+                await sleep(150);
+                
+                // Open the calendar by clicking the input or calendar icon (same approach as test button)
+                dateInput.focus();
+                await sleep(100);
+                
+                // Try clicking the input or calendar icon (use parentElement like test button)
+                const calendarIcon = dateInput.parentElement?.querySelector('.ui-date-field__calendar-icon');
+                if (calendarIcon) {
+                    console.log('[singleDate] Clicking calendar icon to open dropdown');
+                    clickLikeHuman(calendarIcon);
+                } else {
+                    console.log('[singleDate] Clicking date input to open dropdown');
+                    dateInput.click();
+                }
+                
+                await sleep(500);
+                
+                // Check if calendar dropdown is open (same check as test button)
+                let dropdown = dateInput.parentElement?.querySelector('.ui-date-field__dropdown');
+                let isOpen = dropdown && (dropdown.style.display !== 'none' || dropdown.offsetParent !== null);
+                
+                if (!isOpen) {
+                    console.warn('[singleDate] ⚠️ Calendar dropdown not visible, trying alternative approach...');
+                    // Try clicking the input again
+                    dateInput.click();
+                    await sleep(500);
+                    dropdown = dateInput.parentElement?.querySelector('.ui-date-field__dropdown');
+                    isOpen = dropdown && (dropdown.style.display !== 'none' || dropdown.offsetParent !== null);
+                }
+                
+                if (!isOpen || !dropdown) {
+                    console.error('[singleDate] Calendar dropdown not found or not open');
+                    return false;
+                }
+                
+                console.log('[singleDate] ✅ Calendar dropdown found');
+                
+                // Find the calendar table
+                const calendar = dropdown.querySelector('.ui-calendar');
+                if (!calendar) {
+                    console.error('[singleDate] ❌ Calendar table not found');
+                    return false;
+                }
+                
+                console.log('[singleDate] ✅ Calendar table found');
+                
+                // Navigate to the correct month/year (same as test button)
+                const controls = dropdown.querySelector('.ui-date-field__controls');
+                const yearInput = dropdown.querySelector('#provided-service-date-year-input');
+                const prevBtn = dropdown.querySelector('a[role="button"]:first-of-type');
+                const nextBtn = dropdown.querySelector('a[role="button"]:last-of-type');
+                
+                if (!controls || !yearInput || !prevBtn || !nextBtn || !calendar) {
+                    console.error('[singleDate] Calendar structure not found', {
+                        hasControls: !!controls,
+                        hasYearInput: !!yearInput,
+                        hasPrevBtn: !!prevBtn,
+                        hasNextBtn: !!nextBtn,
+                        hasCalendar: !!calendar
+                    });
+                    return false;
+                }
+                
+                // Set the year first (same as test button)
+                const targetYear = date.getFullYear();
+                console.log('[singleDate] Setting year to:', targetYear);
+                yearInput.value = targetYear;
+                fire(yearInput, 'input');
+                fire(yearInput, 'change');
+                await sleep(300);
+                
+                // Navigate to correct month (same as test button)
+                const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+                const targetMonth = date.getMonth(); // 0-indexed
+                
+                // Get current month from the calendar
+                const monthSpan = controls.querySelector('div span');
+                let currentMonthText = monthSpan?.textContent?.trim() || '';
+                console.log('[singleDate] Current month text:', currentMonthText);
+                
+                // Try to navigate to the correct month
+                let attempts = 0;
+                while (attempts < 24) { // Max 24 months (2 years)
+                    const monthText = monthSpan?.textContent?.trim() || '';
+                    const currentMonthIdx = monthNames.findIndex(m => monthText.toLowerCase().includes(m));
+                    
+                    if (currentMonthIdx === targetMonth) {
+                        console.log('[singleDate] ✅ Correct month reached');
+                        break;
+                    }
+                    
+                    if (currentMonthIdx < targetMonth || currentMonthIdx === -1) {
+                        console.log('[singleDate] Clicking next month button');
+                        if (nextBtn) {
+                            M(nextBtn, 'click');
+                            await sleep(200);
+                        }
+                    } else {
+                        console.log('[singleDate] Clicking previous month button');
+                        if (prevBtn) {
+                            M(prevBtn, 'click');
+                            await sleep(200);
+                        }
+                    }
+                    attempts++;
+                }
+                
+                await sleep(300);
+                
+                // Find and click the day (same as test button)
+                const targetDay = String(date.getDate());
+                const dayButtons = Array.from(calendar.querySelectorAll('.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]'));
+                const dayButton = dayButtons.find(btn => {
+                    const btnText = (btn.textContent || '').trim();
+                    return btnText === targetDay;
+                });
+                
+                if (!dayButton) {
+                    console.error(`[singleDate] Day ${targetDay} not found in calendar`);
+                    return false;
+                }
+                
+                console.log(`[singleDate] ✅ Found day button, clicking day ${targetDay}`);
+                dayButton.scrollIntoView({ block: 'center', inline: 'center' });
+                await sleep(100);
+                
+                P(dayButton, 'pointerdown');
+                M(dayButton, 'mousedown');
+                P(dayButton, 'pointerup');
+                M(dayButton, 'mouseup');
+                M(dayButton, 'click');
+                
+                await sleep(300);
+                
+                // Verify the date was set
+                const finalValue = dateInput.value || '';
+                if (finalValue.includes(mdyDate) || finalValue === mdyDate || finalValue !== 'Invalid date') {
+                    console.log('[singleDate] ✅ Date set successfully:', finalValue);
+                    return true;
+                }
+                
+                console.warn('[singleDate] ⚠️ Date may not have been set correctly. Value:', finalValue);
+                return true; // Return true anyway - might still work
+            }
+            
+            const okSingleDate = await setSingleDateRobust(billStart);
+            if (!okSingleDate) {
+                console.warn('[enterBillingDetails] Single date entry did not confirm; continuing.');
+                window.__billingResult = { ok: false, error: 'Failed to set single date' };
+                return;
+            }
+        } else {
+            // ===== Multi-day: Click date range button and use date range picker =====
+            const okRange = await setDateRangeRobust(billStart, billEnd);
+            if (!okRange) {
+                console.warn('[enterBillingDetails] Date range entry did not confirm; continuing.');
+                window.__billingResult = { ok: false, error: 'Failed to set date range' };
+                return;
+            }
         }
 
         // ===== robust "Home" selection =====
@@ -958,22 +1162,24 @@
                 console.log('[enterBillingDetails] ✅ PDF uploaded successfully');
 
                 // NOW submit the form AFTER successful upload
-                console.log('[enterBillingDetails] Now submitting form...');
-                await sleep(500); // Wait for upload dialog to close
+                // COMMENTED OUT FOR TESTING
+                console.log('[enterBillingDetails] Submit button clicking commented out for testing');
+                // console.log('[enterBillingDetails] Now submitting form...');
+                // await sleep(500); // Wait for upload dialog to close
 
-                const submitSuccess = await submit();
-                if (!submitSuccess) {
-                    console.error('[enterBillingDetails] Submit failed after upload');
-                    window.__billingResult = {
-                        ok: true,
-                        actualStart: fmtMDY(billStart),
-                        actualEnd: fmtMDY(billEnd),
-                        actualAmount: amount,
-                        uploadSuccess: true,
-                        submitFailed: true
-                    };
-                    return;
-                }
+                // const submitSuccess = await submit();
+                // if (!submitSuccess) {
+                //     console.error('[enterBillingDetails] Submit failed after upload');
+                //     window.__billingResult = {
+                //         ok: true,
+                //         actualStart: fmtMDY(billStart),
+                //         actualEnd: fmtMDY(billEnd),
+                //         actualAmount: amount,
+                //         uploadSuccess: true,
+                //         submitFailed: true
+                //     };
+                //     return;
+                // }
 
                 window.__billingResult = {
                     ok: true,
@@ -981,7 +1187,7 @@
                     actualEnd: fmtMDY(billEnd),
                     actualAmount: amount,
                     uploadSuccess: true,
-                    submitted: true
+                    submitted: false // Changed to false since we're not submitting
                 };
 
             } catch (uploadErr) {

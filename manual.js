@@ -31,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Test buttons
     const btnTestAttach = document.getElementById('btnTestAttach');
     const btnTestDirect = document.getElementById('btnTestDirect');
+    const btnTestSingleDate = document.getElementById('btnTestSingleDate');
 
     // ---------- CONSTS ----------
     const API_BASE      = "https://dietfantasy-nkw6.vercel.app";
@@ -400,6 +401,212 @@ document.addEventListener('DOMContentLoaded', () => {
             log('Billing injected successfully.');
         } catch (e) {
             setStatus(e.message, 'error'); log('Billing injection failed', { error: e.message });
+        }
+    });
+
+    // Test Single Day Calendar (calendar only, no form opening)
+    btnTestSingleDate.addEventListener('click', async () => {
+        const startISO = startDateInput.value;
+        
+        if (!startISO) { 
+            setStatus('Pick a start date to test.', 'error'); 
+            return; 
+        }
+        
+        try {
+            setStatus('Testing single day calendar…');
+            log('Test Single Day Calendar: Testing calendar interaction only');
+            
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (!tab?.id) throw new Error('No active tab');
+            
+            // Inject a minimal test script that only tests the calendar
+            const result = await chrome.scripting.executeScript({
+                target: { tabId: tab.id },
+                func: async (testDateISO) => {
+                    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                    const fire = (el, type) => el && el.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
+                    const mouse = (el, type) => el && el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                    const pointer = (el, type) => el && el.dispatchEvent(new PointerEvent(type, { pointerId: 1, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true }));
+                    
+                    console.groupCollapsed('[🧪 TEST] Single Day Calendar Test');
+                    console.log('Test date:', testDateISO);
+                    
+                    // Parse the date
+                    const [year, month, day] = testDateISO.split('-').map(Number);
+                    const testDate = new Date(year, month - 1, day);
+                    console.log('Parsed date:', testDate);
+                    
+                    // Find the single date input field
+                    const dateInput = document.getElementById('provided-service-date');
+                    if (!dateInput) {
+                        console.error('[TEST] ❌ provided-service-date input not found');
+                        return { ok: false, error: 'Date input field not found' };
+                    }
+                    
+                    console.log('[TEST] ✅ Found date input:', dateInput);
+                    
+                    // Scroll into view
+                    dateInput.scrollIntoView({ block: 'center', inline: 'center' });
+                    await sleep(200);
+                    
+                    // Click to open calendar
+                    console.log('[TEST] Opening calendar...');
+                    dateInput.focus();
+                    await sleep(100);
+                    
+                    // Try clicking the input or calendar icon
+                    const calendarIcon = dateInput.parentElement?.querySelector('.ui-date-field__calendar-icon');
+                    if (calendarIcon) {
+                        console.log('[TEST] Clicking calendar icon');
+                        pointer(calendarIcon, 'pointerdown');
+                        mouse(calendarIcon, 'mousedown');
+                        pointer(calendarIcon, 'pointerup');
+                        mouse(calendarIcon, 'mouseup');
+                        mouse(calendarIcon, 'click');
+                    } else {
+                        console.log('[TEST] Clicking date input');
+                        dateInput.click();
+                    }
+                    
+                    await sleep(500);
+                    
+                    // Check if calendar dropdown is open
+                    const dropdown = dateInput.parentElement?.querySelector('.ui-date-field__dropdown');
+                    const isOpen = dropdown && (dropdown.style.display !== 'none' || dropdown.offsetParent !== null);
+                    
+                    if (!isOpen) {
+                        console.warn('[TEST] ⚠️ Calendar dropdown not visible, trying alternative approach...');
+                        // Try clicking the input again
+                        dateInput.click();
+                        await sleep(500);
+                    }
+                    
+                    // Find the calendar dropdown
+                    const calendarDropdown = dateInput.parentElement?.querySelector('.ui-date-field__dropdown');
+                    if (!calendarDropdown) {
+                        console.error('[TEST] ❌ Calendar dropdown not found');
+                        return { ok: false, error: 'Calendar dropdown not found' };
+                    }
+                    
+                    console.log('[TEST] ✅ Calendar dropdown found');
+                    
+                    // Find the calendar table
+                    const calendar = calendarDropdown.querySelector('.ui-calendar');
+                    if (!calendar) {
+                        console.error('[TEST] ❌ Calendar table not found');
+                        return { ok: false, error: 'Calendar table not found' };
+                    }
+                    
+                    console.log('[TEST] ✅ Calendar table found');
+                    
+                    // Navigate to the correct month/year
+                    const yearInput = calendarDropdown.querySelector('#provided-service-date-year-input');
+                    const prevBtn = calendarDropdown.querySelector('a[role="button"]:first-of-type');
+                    const nextBtn = calendarDropdown.querySelector('a[role="button"]:last-of-type');
+                    
+                    if (yearInput) {
+                        console.log('[TEST] Setting year to:', year);
+                        yearInput.value = year;
+                        fire(yearInput, 'input');
+                        fire(yearInput, 'change');
+                        await sleep(300);
+                    }
+                    
+                    // Navigate to correct month
+                    const monthNames = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+                    const targetMonth = month - 1; // 0-indexed
+                    
+                    // Get current month from the calendar
+                    const monthSpan = calendarDropdown.querySelector('.ui-date-field__controls div span');
+                    let currentMonthText = monthSpan?.textContent?.trim() || '';
+                    console.log('[TEST] Current month text:', currentMonthText);
+                    
+                    // Try to navigate to the correct month
+                    let attempts = 0;
+                    while (attempts < 24) { // Max 24 months (2 years)
+                        const monthText = monthSpan?.textContent?.trim() || '';
+                        const currentMonthIdx = monthNames.findIndex(m => monthText.toLowerCase().includes(m));
+                        
+                        if (currentMonthIdx === targetMonth) {
+                            console.log('[TEST] ✅ Correct month reached');
+                            break;
+                        }
+                        
+                        if (currentMonthIdx < targetMonth || currentMonthIdx === -1) {
+                            console.log('[TEST] Clicking next month button');
+                            if (nextBtn) {
+                                mouse(nextBtn, 'click');
+                                await sleep(200);
+                            }
+                        } else {
+                            console.log('[TEST] Clicking previous month button');
+                            if (prevBtn) {
+                                mouse(prevBtn, 'click');
+                                await sleep(200);
+                            }
+                        }
+                        attempts++;
+                    }
+                    
+                    await sleep(300);
+                    
+                    // Find and click the day
+                    const dayButtons = Array.from(calendar.querySelectorAll('.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]'));
+                    const targetDayBtn = dayButtons.find(btn => {
+                        const btnText = (btn.textContent || '').trim();
+                        return btnText === String(day);
+                    });
+                    
+                    if (!targetDayBtn) {
+                        console.error('[TEST] ❌ Day button not found for day:', day);
+                        return { ok: false, error: `Day ${day} not found in calendar` };
+                    }
+                    
+                    console.log('[TEST] ✅ Found day button, clicking...');
+                    targetDayBtn.scrollIntoView({ block: 'center', inline: 'center' });
+                    await sleep(100);
+                    
+                    pointer(targetDayBtn, 'pointerdown');
+                    mouse(targetDayBtn, 'mousedown');
+                    pointer(targetDayBtn, 'pointerup');
+                    mouse(targetDayBtn, 'mouseup');
+                    mouse(targetDayBtn, 'click');
+                    
+                    await sleep(300);
+                    
+                    // Check if date was set
+                    const finalValue = dateInput.value || '';
+                    console.log('[TEST] Final input value:', finalValue);
+                    
+                    // Format expected value as MM/DD/YYYY
+                    const expectedValue = `${String(month).padStart(2, '0')}/${String(day).padStart(2, '0')}/${year}`;
+                    
+                    if (finalValue.includes(String(day)) && finalValue.includes(String(year))) {
+                        console.log('[TEST] ✅ Date appears to be set correctly');
+                        console.groupEnd();
+                        return { ok: true, value: finalValue, expected: expectedValue };
+                    } else {
+                        console.warn('[TEST] ⚠️ Date may not be set correctly. Value:', finalValue, 'Expected:', expectedValue);
+                        console.groupEnd();
+                        return { ok: true, value: finalValue, expected: expectedValue, warning: 'Value may not match expected format' };
+                    }
+                },
+                args: [startISO]
+            });
+            
+            const testResult = result[0]?.result;
+            
+            if (testResult?.ok) {
+                setStatus('Calendar test completed!', 'success');
+                log('Single day calendar test successful', testResult);
+            } else {
+                setStatus('Calendar test failed - check console', 'error');
+                log('Single day calendar test failed', testResult);
+            }
+        } catch (e) {
+            setStatus(e.message, 'error'); 
+            log('Single day calendar test failed', { error: e.message });
         }
     });
 

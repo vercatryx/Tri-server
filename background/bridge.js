@@ -1,3 +1,6 @@
+// ===================== Helper: sleep =====================
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
 // ===================== Side panel behavior =====================
 async function enablePanelBehavior() {
     try {
@@ -46,6 +49,249 @@ async function ensureHttpTab(tabId) {
 }
 
 // ===================== Page readiness helpers =====================
+// Reusable login sequence function
+async function performLoginSequence(tabId, email = "orit@dietfantasy.com", password = "Diet1234fantasy") {
+    try {
+        console.log('[background/bridge] performLoginSequence: Starting login...');
+        
+        // Navigate to auth page
+        await chrome.tabs.update(tabId, { url: 'https://app.auth.uniteus.io/' });
+        
+        // Wait a bit for potential redirect
+        await sleep(2000);
+        
+        // Check if we're already logged in (redirected to dashboard)
+        const tab = await chrome.tabs.get(tabId);
+        const currentUrl = tab.url || '';
+        console.log('[background/bridge] performLoginSequence: Current URL after navigation:', currentUrl);
+        
+        // Check if we're already on dashboard (already logged in)
+        if (currentUrl.includes('app.uniteus.io') && !currentUrl.includes('app.auth.uniteus.io')) {
+            console.log('[background/bridge] performLoginSequence: ✓ Already logged in! Redirected to:', currentUrl);
+            await sleep(2000);
+            return { ok: true, loginComplete: true, alreadyLoggedIn: true };
+        }
+        
+        // If we're still on auth page, continue with login process
+        if (!currentUrl.includes('app.auth.uniteus.io')) {
+            await waitForTabComplete(tabId, 30000);
+        } else {
+            await sleep(1000);
+        }
+        
+        // Inject loginFlow.js
+        console.log('[background/bridge] performLoginSequence: Injecting loginFlow.js...');
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ['modules/loginFlow.js']
+        });
+        
+        // Send email
+        console.log('[background/bridge] performLoginSequence: Sending email to loginFlow...');
+        await chrome.tabs.sendMessage(tabId, {
+            type: 'LOGIN_FLOW_SETTINGS',
+            email: email
+        });
+        
+        // Wait for redirect to password page
+        console.log('[background/bridge] performLoginSequence: Waiting for password page...');
+        let passwordPageReached = false;
+        const maxWait = 20000;
+        const startTime = Date.now();
+        
+        while (Date.now() - startTime < maxWait && !passwordPageReached) {
+            await sleep(500);
+            try {
+                const tab = await chrome.tabs.get(tabId);
+                const currentUrl = tab.url || '';
+                console.log('[background/bridge] performLoginSequence: Checking URL:', currentUrl);
+                
+                if (currentUrl.includes('app.auth.uniteus.io/login') || 
+                    (currentUrl.includes('app.auth.uniteus.io') && currentUrl.includes('login'))) {
+                    passwordPageReached = true;
+                    console.log('[background/bridge] performLoginSequence: ✓ Password page detected:', currentUrl);
+                    break;
+                }
+            } catch (e) {
+                console.warn('[background/bridge] performLoginSequence: Error checking tab:', e);
+            }
+        }
+        
+        if (!passwordPageReached) {
+            console.error('[background/bridge] performLoginSequence: Password page not reached after', maxWait, 'ms');
+            console.log('[background/bridge] performLoginSequence: Proceeding anyway - page might be ready');
+        }
+        
+        // Wait a bit for page elements to be ready
+        console.log('[background/bridge] performLoginSequence: Waiting for password page elements to be ready...');
+        await sleep(3000);
+        
+        // Inject step2Patch.js
+        console.log('[background/bridge] performLoginSequence: Injecting step2Patch.js...');
+        try {
+            await chrome.scripting.executeScript({
+                target: { tabId },
+                files: ['modules/step2Patch.js']
+            });
+            console.log('[background/bridge] performLoginSequence: ✓ step2Patch.js injected');
+        } catch (e) {
+            console.error('[background/bridge] performLoginSequence: Failed to inject step2Patch.js:', e);
+            return { ok: false, error: 'Failed to inject step2Patch: ' + e.message };
+        }
+        
+        // Wait a bit for the script to initialize
+        await sleep(1000);
+        
+        // Send password - try multiple times if needed
+        console.log('[background/bridge] performLoginSequence: Sending password to step2Patch...');
+        let messageSent = false;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                await chrome.tabs.sendMessage(tabId, {
+                    type: 'STEP2_SETTINGS',
+                    email: email,
+                    password: password,
+                    autoSubmit: true
+                });
+                messageSent = true;
+                console.log(`[background/bridge] performLoginSequence: ✓ Password message sent (attempt ${attempt})`);
+                break;
+            } catch (e) {
+                console.warn(`[background/bridge] performLoginSequence: Message send attempt ${attempt} failed:`, e.message);
+                if (attempt < 3) {
+                    await sleep(1000);
+                }
+            }
+        }
+        
+        if (!messageSent) {
+            console.error('[background/bridge] performLoginSequence: ❌ Failed to send password message after 3 attempts');
+            // Try direct injection as fallback
+            console.log('[background/bridge] performLoginSequence: Trying direct password injection as fallback...');
+            try {
+                await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: (pwd) => {
+                        console.log('[DF EXTENSION] 🔐 Direct password injection fallback...');
+                        
+                        let passwordInput = document.querySelector('#app_1_user_password');
+                        if (!passwordInput) {
+                            passwordInput = document.querySelector('input[type="password"]');
+                        }
+                        if (!passwordInput) {
+                            passwordInput = document.querySelector('input[name*="password" i]');
+                        }
+                        if (!passwordInput) {
+                            passwordInput = document.querySelector('input[id*="password" i]');
+                        }
+                        
+                        if (passwordInput) {
+                            passwordInput.value = pwd;
+                            passwordInput.focus();
+                            passwordInput.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+                            passwordInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                            passwordInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true }));
+                            passwordInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true }));
+                            console.log('[DF EXTENSION] ✓ Password filled directly');
+                            
+                            setTimeout(() => {
+                                let signInButton = document.querySelector('#auth-1-submit-btn');
+                                if (!signInButton) {
+                                    signInButton = document.querySelector('input[type="submit"][value="Sign in"]');
+                                }
+                                if (!signInButton) {
+                                    signInButton = document.querySelector('button[type="submit"]');
+                                }
+                                if (!signInButton) {
+                                    signInButton = document.querySelector('input[type="submit"]');
+                                }
+                                if (!signInButton) {
+                                    const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+                                    signInButton = buttons.find(btn => 
+                                        (btn.textContent || btn.value || '').toLowerCase().includes('sign in') ||
+                                        (btn.textContent || btn.value || '').toLowerCase().includes('submit')
+                                    );
+                                }
+                                
+                                if (signInButton) {
+                                    console.log('[DF EXTENSION] ✓ Clicking sign in button');
+                                    signInButton.focus();
+                                    signInButton.click();
+                                } else {
+                                    console.error('[DF EXTENSION] ❌ Sign in button not found');
+                                }
+                            }, 500);
+                        } else {
+                            console.error('[DF EXTENSION] ❌ Password input not found with any selector');
+                        }
+                    },
+                    args: [password]
+                });
+                console.log('[background/bridge] performLoginSequence: ✓ Direct password injection completed');
+            } catch (e) {
+                console.error('[background/bridge] performLoginSequence: ❌ Direct injection also failed:', e);
+                return { ok: false, error: 'Failed to send password: ' + e.message };
+            }
+        }
+        
+        // Wait a bit for password to be processed
+        await sleep(2000);
+        
+        // Wait for login to complete (redirect to dashboard)
+        console.log('[background/bridge] performLoginSequence: Waiting for login to complete...');
+        let loginComplete = false;
+        const loginMaxWait = 30000;
+        const loginStartTime = Date.now();
+        
+        while (Date.now() - loginStartTime < loginMaxWait && !loginComplete) {
+            await sleep(1000);
+            try {
+                const tab = await chrome.tabs.get(tabId);
+                const currentUrl = tab.url || '';
+                console.log('[background/bridge] performLoginSequence: Checking login status, URL:', currentUrl);
+                
+                if (currentUrl && !currentUrl.includes('auth')) {
+                    loginComplete = true;
+                    console.log('[background/bridge] performLoginSequence: ✓ Login successful! Redirected to:', currentUrl);
+                    break;
+                }
+                
+                if (currentUrl.includes('app.uniteus.io') && !currentUrl.includes('app.auth.uniteus.io')) {
+                    loginComplete = true;
+                    console.log('[background/bridge] performLoginSequence: ✓ Detected dashboard/UniteUs page:', currentUrl);
+                    break;
+                }
+            } catch (e) {
+                console.warn('[background/bridge] performLoginSequence: Error checking tab:', e);
+            }
+        }
+        
+        if (loginComplete) {
+            await sleep(2000);
+            console.log('[background/bridge] performLoginSequence: ✓ Login complete and ready');
+            return { ok: true, loginComplete: true };
+        } else {
+            try {
+                const tab = await chrome.tabs.get(tabId);
+                const finalUrl = tab.url || '';
+                if (finalUrl && !finalUrl.includes('auth')) {
+                    console.log('[background/bridge] performLoginSequence: ✓ Login successful on final check:', finalUrl);
+                    return { ok: true, loginComplete: true };
+                } else {
+                    console.error('[background/bridge] performLoginSequence: ❌ Login timeout - still on auth page:', finalUrl);
+                    return { ok: false, error: 'Login timeout - did not redirect from auth page' };
+                }
+            } catch (e) {
+                console.error('[background/bridge] performLoginSequence: ❌ Login timeout - error checking final URL:', e);
+                return { ok: false, error: 'Login timeout - error: ' + e.message };
+            }
+        }
+    } catch (e) {
+        console.error("[background/bridge] performLoginSequence error:", e);
+        return { ok: false, error: e?.message || String(e) };
+    }
+}
+
 async function waitForTabComplete(tabId, timeoutMs = 60000) {
     const done = await new Promise((resolve) => {
         const listener = (changedTabId, info) => {
@@ -91,6 +337,58 @@ async function waitForXPathVisibleAndStable(tabId, xpath, timeoutMs = 45000, int
         if (result?.ok) { await new Promise(r => setTimeout(r, 500)); return; }
         await new Promise(r => setTimeout(r, intervalMs));
     }
+    
+    // Before throwing, check if we're on an auth page - if so, perform login and retry
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        const currentUrl = tab.url || '';
+        if (currentUrl.toLowerCase().includes('auth')) {
+            console.log(`[background/bridge] Element ${xpath} timeout detected on auth page, performing login sequence...`);
+            const loginResult = await performLoginSequence(tabId);
+            if (loginResult.ok) {
+                console.log(`[background/bridge] Login successful, retrying wait for element...`);
+                // Retry waiting for the element after login
+                const retryStarted = Date.now();
+                const retryTimeout = 30000; // Give it 30 seconds after login
+                while (Date.now() - retryStarted < retryTimeout) {
+                    const [{ result }] = await chrome.scripting.executeScript({
+                        target: { tabId },
+                        func: (xp) => {
+                            try {
+                                const el = document.evaluate(
+                                    xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                                ).singleNodeValue;
+                                if (!el) return { ok: false, reason: "not-found" };
+                                const style = window.getComputedStyle(el);
+                                if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")
+                                    return { ok: false, reason: "hidden" };
+                                const rect = el.getBoundingClientRect();
+                                if (!rect.width || !rect.height) return { ok: false, reason: "zero-size" };
+                                const cx = rect.left + rect.width / 2;
+                                const cy = rect.top + rect.height / 2;
+                                const elAtPoint = document.elementFromPoint(cx, cy);
+                                const interactable = elAtPoint && (el === elAtPoint || el.contains(elAtPoint));
+                                return { ok: interactable, reason: interactable ? "interactable" : "covered" };
+                            } catch (e) { return { ok: false, reason: String(e) }; }
+                        },
+                        args: [xpath]
+                    });
+                    if (result?.ok) { await new Promise(r => setTimeout(r, 500)); return; }
+                    await new Promise(r => setTimeout(r, intervalMs));
+                }
+                throw new Error(`Element ${xpath} never became visible/interactable after login within ${retryTimeout}ms`);
+            } else {
+                throw new Error(`Element ${xpath} never became visible/interactable within ${timeoutMs}ms (login attempt failed: ${loginResult.error || 'unknown'})`);
+            }
+        }
+    } catch (e) {
+        // If checking URL or login fails, throw the original error
+        if (e.message.includes('never became visible/interactable')) {
+            throw e;
+        }
+        console.warn(`[background/bridge] Error checking auth URL or performing login:`, e);
+    }
+    
     throw new Error(`Element ${xpath} never became visible/interactable within ${timeoutMs}ms`);
 }
 
@@ -508,6 +806,79 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 return;
             }
 
+            // --- Cookie and browsing data deletion ---
+            if (msg.type === "DF_CLEAR_COOKIES_AND_DATA") {
+                try {
+                    console.log('[background/bridge] DF_CLEAR_COOKIES_AND_DATA received');
+                    
+                    // Clear browsing data for UniteUs domains (this includes cookies, cache, localStorage, sessionStorage)
+                    try {
+                        await chrome.browsingData.remove({
+                            "origins": [
+                                "https://app.uniteus.io",
+                                "https://app.auth.uniteus.io",
+                                "https://uniteus.io"
+                            ]
+                        }, {
+                            "cookies": true,
+                            "cache": true,
+                            "localStorage": true,
+                            "sessionStorage": true
+                        });
+                        console.log("[background/bridge] ✓ Cleared browsing data for UniteUs domains");
+                    } catch (e) {
+                        console.warn("[background/bridge] Failed to clear browsing data:", e);
+                    }
+                    
+                    // Also try to clear cookies directly for the domains
+                    try {
+                        const domains = ["app.uniteus.io", "app.auth.uniteus.io", "uniteus.io"];
+                        for (const domain of domains) {
+                            const cookies = await chrome.cookies.getAll({ domain: domain });
+                            for (const cookie of cookies) {
+                                try {
+                                    const cookieUrl = `${cookie.secure ? 'https' : 'http'}://${cookie.domain}${cookie.path || '/'}`;
+                                    await chrome.cookies.remove({
+                                        url: cookieUrl,
+                                        name: cookie.name
+                                    });
+                                } catch (e) {
+                                    // Ignore individual cookie removal errors
+                                }
+                            }
+                        }
+                        console.log("[background/bridge] ✓ Cleared cookies for UniteUs domains");
+                    } catch (e) {
+                        console.warn("[background/bridge] Failed to clear cookies directly:", e);
+                    }
+                    
+                    sendResponse({ ok: true });
+                    return;
+                } catch (e) {
+                    console.error("[background/bridge] DF_CLEAR_COOKIES_AND_DATA error:", e);
+                    sendResponse({ ok: false, error: e?.message || String(e) });
+                    return;
+                }
+            }
+
+            // --- Programmatic login sequence ---
+            if (msg.type === "DF_DO_LOGIN") {
+                try {
+                    console.log('[background/bridge] DF_DO_LOGIN received');
+                    const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                    const email = msg.email || "orit@dietfantasy.com";
+                    const password = msg.password || "Diet1234fantasy";
+                    
+                    const loginResult = await performLoginSequence(tabId, email, password);
+                    sendResponse(loginResult);
+                    return;
+                } catch (e) {
+                    console.error("[background/bridge] DF_DO_LOGIN error:", e);
+                    sendResponse({ ok: false, error: e?.message || String(e) });
+                    return;
+                }
+            }
+
             // --- manual actions: ensure inject + forward to page ---
             if (msg.type === "READ_PERSON_INFO" ||
                 msg.type === "UPLOAD_PDF" ||
@@ -522,7 +893,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 return;
             }
 
-            sendResponse({ ok:false, error:"Unknown message type" });
+            sendResponse({ ok:false, error:"Unknown message type: " + (msg?.type || "undefined") });
         } catch (e) {
             sendResponse({ ok:false, error: e?.message || String(e) });
         }
