@@ -1,0 +1,76 @@
+[
+//  lsof -ti:3500 | xargs kill -9 2>/dev/null; cd server-side-automation && npm star`
+
+  {
+    "name": "SHOSHANA ZITRENBAUM",
+    "client#": 731,
+    "url": "https://app.uniteus.io/dashboard/cases/open/d13495bc-ecb2-45e2-a265-3a9c3087ee18/contact/bf451848-f0f8-43d1-9028-03724e938051",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "ESTHER ZITRENBAUM",
+    "client#": 750,
+    "url": "https://app.uniteus.io/dashboard/cases/open/9d325e1f-6488-40be-903c-e49f784604a9/contact/8a043890-04a4-49aa-a630-33a31732df2b",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "YOCHEVED ZITRENBAUM",
+    "client#": 753,
+    "url": "https://app.uniteus.io/dashboard/cases/open/ddf8695c-9c01-4c2d-927f-ebf39baaf0af/contact/5e32bb8f-1867-45a2-a026-4123c171b393",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "HENNY ZRYL",
+    "client#": 762,
+    "url": "https://app.uniteus.io/dashboard/cases/open/fbce8e1a-0cb4-4a0f-b98d-9f8804e48eb0/contact/5efe61dc-28f0-40d4-bfba-87e553aeb02e",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "SHANI ZUMAN",
+    "client#": 864,
+    "url": "https://app.uniteus.io/dashboard/cases/open/228a8d22-4f1e-45e0-9590-6e0d3d53edd3/contact/539c08b7-e7d9-469e-a0d7-7caede665677",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "BASHY ZUSSMAN",
+    "client#": 310,
+    "url": "https://app.uniteus.io/dashboard/cases/open/74dd794f-2854-40eb-bd27-77ca059b4b47/contact/1c516c50-5924-4514-ad36-029b3d6b9049",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "ELKY ZWIEBEL",
+    "client#": 335,
+    "url": "https://app.uniteus.io/dashboard/cases/open/9cf3fb25-4647-461a-8406-96c992d5090c/contact/f7b8cb49-3b96-41c3-b23a-a738df597497",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  },
+  {
+    "name": "BAILA ZWIEBEL",
+    "client#": 311,
+    "url": "https://app.uniteus.io/dashboard/cases/open/f82c1006-694e-474a-baae-4bd605481265/contact/b4fdf19d-32ac-4016-a1d9-7fe6f543aee3",
+    "date": "2026-01-12",
+    "amount": null,
+    "proofURL": null,
+    "dependants": []
+  }
+]

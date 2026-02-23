@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DF Billing Automation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>DF Billing Automation</h1>
+            <div id="connection-status" class="badge">Connecting...</div>
+        </header>
+
+        <section class="controls">
+            <button id="btn-start" onclick="triggerProcess('file')">▶ Start from File</button>
+            <button id="btn-start-api" onclick="triggerProcess('api')" style="background: #2563eb; margin-left: 10px;">☁
+                Start from API</button>
+            <button id="btn-download" onclick="downloadCloudRequests()"
+                style="background: #10b981; margin-left: 10px;">⬇ Download from Cloud</button>
+
+            <div id="api-config" style="margin-top: 10px; display: flex; gap: 10px;">
+                <input type="text" id="api-base-url" placeholder="API Base URL (e.g. http://localhost:3000)"
+                    style="padding: 5px; flex: 1;">
+                <input type="password" id="api-key" placeholder="API Key" style="padding: 5px; flex: 1;">
+            </div>
+
+            <div class="stats">
+                <span>Total: <b id="stat-total">0</b></span>
+                <span>Waiting: <b id="stat-pending">0</b></span>
+                <span>Completed: <b id="stat-success">0</b></span>
+                <span>Failed: <b id="stat-failed">0</b></span>
+            </div>
+        </section>
+
+        <div class="main-grid">
+            <section class="queue-panel">
+                <h2>Request Queue</h2>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th onclick="sortQueue('id')"># ↕</th>
+                                <th onclick="sortQueue('name')">Client ↕</th>
+                                <th onclick="sortQueue('start')">Dates ↕</th>
+                                <th onclick="sortQueue('status')">Status ↕</th>
+                                <th onclick="sortQueue('message')">Message ↕</th>
+                            </tr>
+                        </thead>
+                        <tbody id="queue-body">
+                            <!-- Items will be injected here -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="log-panel">
+                <h2>Live Activity</h2>
+                <div id="terminal" class="terminal">
+                    <div class="line dimmed">Waiting for logs...</div>
+                </div>
+            </section>
+        </div>
+    </div>
+    <script src="client.js"></script>
+</body>
+
+</html>
