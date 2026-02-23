@@ -16,6 +16,11 @@
             el && el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
         const pointer = (el, type) =>
             el && el.dispatchEvent(new PointerEvent(type, { pointerId:1, pointerType:'mouse', isPrimary:true, bubbles:true, cancelable:true }));
+        const clickLikeHuman = (el) => {
+            if (!el) return;
+            pointer(el, 'pointerdown'); mouse(el, 'mousedown');
+            pointer(el, 'pointerup'); mouse(el, 'mouseup'); mouse(el, 'click');
+        };
         const keyEvt = (el, type, key='Enter', code=key) =>
             el && el.dispatchEvent(new KeyboardEvent(type, { key, code, bubbles: true, cancelable: true }));
         const setNativeInputValue = (el, value) => {
@@ -54,39 +59,42 @@
         const addDays = (date, n) => { const d = new Date(date.getTime()); d.setDate(d.getDate() + n); return d; };
         const shown = (el) => !!(el && (el.offsetParent !== null || (el.getClientRects?.().length || 0) > 0));
 
-        // ===== constants =====
-        const ADD_BTN_ID = 'add-fee-schedule-service-provided-button';
-        const ADD_BTN_XP = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[1]/div/button';
+        // ===== constants (from window.UNITE_SELECTORS.billing when available) =====
+        const sel = (typeof window !== 'undefined' && window.UNITE_SELECTORS && window.UNITE_SELECTORS.billing) || {};
+        if (sel.addButton) console.log('[enterBillingDetails] Using selectors from uniteSelectors.js');
+        else console.warn('[enterBillingDetails] window.UNITE_SELECTORS not loaded — inject modules/uniteSelectors.js first. Using fallback values.');
+        const ADD_BTN_ID = (sel.addButton && sel.addButton.id) || 'add-fee-schedule-service-provided-button';
+        const ADD_BTN_XP = (sel.addButton && sel.addButton.xpath) || '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[1]/div/button';
 
         const XPATH_REMAINING = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[1]/div[1]/p/span';
         const XPATH_RANGE = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[1]/div[2]/p';
 
-        const AMOUNT_ID = 'provided-service-unit-amount';
-        const AMOUNT_XPATH = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[3]/div[1]/div/input';
+        const AMOUNT_ID = (sel.amount && sel.amount.id) || 'provided-service-unit-amount';
+        const AMOUNT_XPATH = (sel.amount && sel.amount.xpath) || '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[3]/div[1]/div/input';
 
-        const PLACE_ID = 'provided-service-place_of_service';
-        const PLACE_OUTER_XPATH = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[5]/div[2]/div/div[1]/div/div[1]';
+        const PLACE_ID = (sel.placeOfService && sel.placeOfService.id) || 'provided-service-place_of_service';
+        const PLACE_OUTER_XPATH = (sel.placeOfService && sel.placeOfService.xpath) || '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[5]/div[2]/div/div[1]/div[1]';
 
         const NOTE_XPATH = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[7]/div/div/div[2]/textarea';
 
-        const SUBMIT_ID = 'fee-schedule-provided-service-post-note-btn';
-        const SUBMIT_XP = '//*[@id="fee-schedule-provided-service-post-note-btn"]';
+        const SUBMIT_ID = (sel.submit && sel.submit.id) || 'fee-schedule-provided-service-post-note-btn';
+        const SUBMIT_XP = '//*[@id="' + SUBMIT_ID + '"]';
         const DRAFT_ID = 'fee-schedule-provided-service-post-note-btn-secondary';
 
-        const CANCEL_ID = 'fee-schedule-provided-service-cancel-btn';
+        const CANCEL_ID = (sel.cancelButton && sel.cancelButton.id) || 'fee-schedule-provided-service-cancel-btn';
         const CANCEL_XP = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[10]/button';
 
-        const HOME_TEXT = '12 - Home';
-        const HOME_VALUE = 'c0d441b4-ba1b-4f68-93af-a4d7d6659fba';
+        const HOME_TEXT = (sel.placeOfService && sel.placeOfService.homeText) || '12 - Home';
+        const HOME_VALUE = (sel.placeOfService && sel.placeOfService.homeValue) || 'c0d441b4-ba1b-4f68-93af-a4d7d6659fba';
 
-        // Date Range label + widget
-        const DATE_RANGE_LABEL_ID = 'Date Range-label';
-        const DATE_RANGE_LABEL_XP = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[4]/fieldset/div[2]/label/span';
-        const RANGE_BTN_ID = 'provided-service-dates';
+        const dr = sel.dateRange || {};
+        const DATE_RANGE_LABEL_ID = dr.labelId || 'Date Range-label';
+        const DATE_RANGE_LABEL_XP = dr.labelXpath || '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[4]/fieldset/div[2]/label/span';
+        const RANGE_BTN_ID = dr.buttonId || 'provided-service-dates';
         const START_ID = 'provided-service-dates-start';
         const END_ID = 'provided-service-dates-end';
-        const START_YR_ID = 'provided-service-dates-start-year';
-        const END_YR_ID = 'provided-service-dates-end-year';
+        const START_YR_ID = dr.startYearId || 'provided-service-dates-start-year';
+        const END_YR_ID = dr.endYearId || 'provided-service-dates-end-year';
 
         // ===== inputs from popup =====
         const args = window.__BILLING_INPUTS__ || {};
@@ -113,11 +121,15 @@
                 return Number.isFinite(n) ? Math.round(n*100) : NaN;
             };
             const sameDay = (a,b) => a && b && a.getTime()===b.getTime();
-            const cards = Array.from(document.querySelectorAll('.fee-schedule-provided-service-card'));
+            const cardClass = (sel.duplicateScan && sel.duplicateScan.cardClass) || 'fee-schedule-provided-service-card';
+            const cards = Array.from(document.querySelectorAll('.' + cardClass.replace(/^\./, '')));
             const tCents = cents(amount);
+            const amtTest = (sel.duplicateScan && sel.duplicateScan.amountDataTest) || 'unit-amount-value';
+            const datesTest = (sel.duplicateScan && sel.duplicateScan.datesDataTest) || ['service-dates-value', 'service-start-date-value'];
+            const datesSel = Array.isArray(datesTest) ? datesTest.map(d => '[data-test-element="' + d + '"]').join(', ') : '[data-test-element="' + datesTest + '"]';
             for (const card of cards) {
-                const amtEl = card.querySelector('[data-test-element="unit-amount-value"]');
-                const rngEl = card.querySelector('[data-test-element="service-dates-value"], [data-test-element="service-start-date-value"]');
+                const amtEl = card.querySelector('[data-test-element="' + amtTest + '"]');
+                const rngEl = card.querySelector(datesSel);
                 const amtCents = cents(norm(amtEl?.textContent));
                 const txt = norm(rngEl?.textContent);
                 let s=null,e=null;
@@ -305,30 +317,37 @@
             console.log('[enterBillingDetails] Shelf already open.');
         }
 
-        // ===== actively wait for the authorized nodes after open =====
-        const waitForAuthBits = async (timeoutMs = 4000) => {
+        // ===== wait for authorized limits from main-page table (same as server) =====
+        // Server uses only main page: authorizedTable.date + authorizedTable.amount. No shelf-internal elements.
+        const authTable = sel.authorizedTable || {};
+        const getAuthDateEl = () =>
+            (authTable.date && (document.getElementById(authTable.date.id) || (authTable.date.xpath && byXPath(authTable.date.xpath)))) || null;
+        const getAuthAmountEl = () =>
+            (authTable.amount && (document.getElementById(authTable.amount.id) || (authTable.amount.xpath && byXPath(authTable.amount.xpath)))) || null;
+
+        const waitForAuthBits = async (timeoutMs = 5000) => {
             const startT = Date.now();
             while (Date.now() - startT < timeoutMs) {
-                const remainingSpan = byXPath(XPATH_REMAINING);
-                const rangeP = byXPath(XPATH_RANGE);
-                if (remainingSpan && shown(remainingSpan) && rangeP && shown(rangeP)) {
-                    return { remainingSpan, rangeP };
+                const dateEl = getAuthDateEl();
+                const amountEl = getAuthAmountEl();
+                if (dateEl && shown(dateEl) && amountEl && shown(amountEl)) {
+                    return { dateEl, amountEl };
                 }
                 await sleep(120);
             }
-            return { remainingSpan: null, rangeP: null };
+            return { dateEl: null, amountEl: null };
         };
 
-        const { remainingSpan, rangeP } = await waitForAuthBits(4500);
-        if (!remainingSpan || !rangeP) {
-            console.warn('[enterBillingDetails] Missing authorized limit elements after open.');
+        const { dateEl, amountEl } = await waitForAuthBits(5500);
+        if (!dateEl || !amountEl) {
+            console.warn('[enterBillingDetails] Missing authorized limit elements. (Main page: #basic-table-authorized-service-delivery-date-s-value and #basic-table-authorized-amount-value or authorizedTable.date/amount xpaths.)');
             window.__billingResult = { ok: false, error: 'Billing form elements not found' };
             return;
         }
 
-        // ===== read authorized remaining + range =====
-        const remaining = parseCurrency(remainingSpan.textContent || '');
-        const rawRange = (rangeP.textContent || '').trim();
+        // ===== read authorized range + remaining from main-page table (same as server) =====
+        const rawRange = (dateEl.textContent || '').trim();
+        const remaining = parseCurrency(amountEl.textContent || '');
         const parts = rawRange.split(/[-–—]/).map(s => s.trim());
         const authStart = parseMDY(parts[0] || '');
         const authEnd = parseMDY(parts[1] || '');
@@ -393,198 +412,302 @@
         fire(amountField, 'change');
         amountField.blur();
 
-        // ===== robust date-range setter =====
-// ===== robust date-range setter (pane-aware; safe across months) =====
+        // ===== Date range setter (same logic as server: duration → date-field two-calendar → input → legacy) =====
         async function setDateRangeRobust(bStart, bEnd) {
-
-                console.groupCollapsed('[🧭 setDateRangeRobust] Starting');
-                const fmt = (d)=>`${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
-                console.log('Input dates from billing logic:', fmt(bStart), '→', fmt(bEnd));
-                console.log('Raw timestamps:', bStart.getTime(), bEnd.getTime());
-            const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
-            const byXPath = (xp) =>
-                document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue || null;
-            const shown = (el)=>!!(el && (el.offsetParent !== null || (el.getClientRects?.().length||0) > 0));
-            const M = (el,t)=>el && el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window}));
-            const P = (el,t)=>el && el.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,pointerId:1,pointerType:'mouse',isPrimary:true}));
-
-            const DATE_RANGE_LABEL_ID  = 'Date Range-label';
-            const DATE_RANGE_LABEL_XP  = '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div[2]/div/form/div[4]/fieldset/div[2]/label/span';
-            const RANGE_BTN_ID         = 'provided-service-dates';
-            const START_YR_ID          = 'provided-service-dates-start-year';
-            const END_YR_ID            = 'provided-service-dates-end-year';
-
-            const isOpen = () => !!document.querySelector('.ui-duration-field__dropdown.ui-duration-field__dropdown--open');
-
-            // ---- OPEN RELIABLY ----
-            const getFakeCandidates = () => {
-                const a = document.getElementById(RANGE_BTN_ID);
-                const b = document.querySelector('.ui-duration-field__fake-input [role="button"]');
-                const c = document.querySelector('.ui-duration-field__fake-input .ui-duration-field__fake-input__value');
-                const d = document.querySelector('.ui-duration-field__fake-input');
-                return [a,b,c,d].filter(Boolean);
+            const dr = sel.dateRange || {};
+            const sleepLocal = (ms) => new Promise(r => setTimeout(r, ms));
+            const getCoords = (el) => {
+                const r = el.getBoundingClientRect();
+                const x = r.left + r.width / 2, y = r.top + r.height / 2;
+                return { clientX: x, clientY: y, pageX: x + window.pageXOffset, pageY: y + window.pageYOffset };
             };
-            const clickLikeHuman = (el) => { P(el,'pointerdown'); M(el,'mousedown'); P(el,'pointerup'); M(el,'mouseup'); M(el,'click'); };
+            const clickHumanAsync = async (el, delayMs) => {
+                delayMs = delayMs || 20;
+                if (!el) return;
+                el.scrollIntoView?.({ block: 'center', inline: 'center' });
+                await sleepLocal(50);
+                const c = getCoords(el);
+                el.focus?.();
+                await sleepLocal(30);
+                const m = (t, o) => el.dispatchEvent(new MouseEvent(t, { view: window, bubbles: true, cancelable: true, ...c, ...o }));
+                const p = (t, o) => el.dispatchEvent(new PointerEvent(t, { pointerId: 1, pointerType: 'mouse', isPrimary: true, pressure: t === 'pointerdown' ? 1 : 0, width: 1, height: 1, ...c, bubbles: true, cancelable: true, ...o }));
+                m('mousemove', {}); p('pointermove', {});
+                await sleepLocal(delayMs);
+                p('pointerdown', { buttons: 1 });
+                await sleepLocal(delayMs);
+                m('mousedown', { buttons: 1, detail: 1 });
+                await sleepLocal(delayMs);
+                p('pointerup', { buttons: 0 });
+                await sleepLocal(delayMs);
+                m('mouseup', { buttons: 0, detail: 1 });
+                await sleepLocal(delayMs);
+                m('click', { detail: 1 });
+            };
+            const clickLikeHumanLocal = (el) => {
+                if (!el) return;
+                const P = (e, t) => e && e.dispatchEvent(new PointerEvent(t, { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                const M = (e, t) => e && e.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
+                P(el, 'pointerdown'); M(el, 'mousedown'); P(el, 'pointerup'); M(el, 'mouseup'); M(el, 'click');
+            };
 
-            // Report result to the panel + keep a local window flag for debugging
-            function reportBillingResult(res) {
-                try {
-                    chrome.runtime?.sendMessage?.({
-                        type: "BILLING_RESULT",
-                        ...res,
-                        // Echo the userId we injected from the panel, if present
-                        userId: window.__BILLING_INPUTS__?.userId ?? null
-                    });
-                } catch {}
-                // also stash for manual inspection in console
-                window.__billingResult = res;
-            }
+            const isOpen = () => {
+                const openEl = dr.dropdownOpenClass && document.querySelector('.' + String(dr.dropdownOpenClass).replace(/\s+/g, '.'));
+                if (openEl) return true;
+                const dd = dr.dropdownClass && document.querySelector(dr.dropdownClass);
+                if (dd && (dd.offsetParent !== null || (dd.getBoundingClientRect?.().height || 0) > 0)) return true;
+                const durationDdEl = dr.durationDropdown && document.querySelector(dr.durationDropdown);
+                if (durationDdEl && (durationDdEl.offsetParent !== null || (durationDdEl.getBoundingClientRect?.().height || 0) > 0)) return true;
+                return false;
+            };
 
-            async function openPickerRobust() {
+            const getFakeCandidates = () => {
+                const fi = dr.fakeInput || {};
+                const byTrigger = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
+                const a = dr.buttonId ? document.getElementById(dr.buttonId) : null;
+                const b = fi.roleButton ? document.querySelector(fi.roleButton) : null;
+                const c = fi.value ? document.querySelector(fi.value) : null;
+                const d = fi.container ? document.querySelector(fi.container) : null;
+                return [byTrigger, a, b, c, d].filter(Boolean);
+            };
+
+            async function openPicker() {
                 if (isOpen()) return true;
-
-                const label = document.getElementById(DATE_RANGE_LABEL_ID) || byXPath(DATE_RANGE_LABEL_XP);
+                const label = (dr.labelId && document.getElementById(dr.labelId)) || (dr.labelXpath ? byXPath(dr.labelXpath) : null);
                 const tryOnce = async () => {
+                    if (dr.triggerXpath) {
+                        const triggerBtn = byXPath(dr.triggerXpath);
+                        if (triggerBtn && shown(triggerBtn)) {
+                            await clickHumanAsync(triggerBtn, 25);
+                            for (let i = 0; i < 15; i++) { if (isOpen()) return true; await sleepLocal(80); }
+                        }
+                    }
+                    if (label && shown(label)) {
+                        clickLikeHumanLocal(label);
+                        await sleepLocal(120);
+                        if (isOpen()) return true;
+                    }
                     const cands = getFakeCandidates();
-                    // 1) label tap (some builds need it to reveal inputs)
-                    if (label && shown(label)) { clickLikeHuman(label); await sleep(120); if (isOpen()) return true; }
-
-                    // 2) try all fake candidates
                     for (const el of cands) {
                         if (!shown(el)) continue;
-                        el.scrollIntoView?.({block:'center', inline:'center'});
-                        await sleep(40);
-                        clickLikeHuman(el);
-                        for (let i=0;i<10;i++){ if (isOpen()) return true; await sleep(60); }
+                        el.scrollIntoView?.({ block: 'center', inline: 'center' });
+                        await sleepLocal(40);
+                        clickLikeHumanLocal(el);
+                        for (let i = 0; i < 10; i++) { if (isOpen()) return true; await sleepLocal(60); }
                     }
-
-                    // 3) keyboard fallback on best candidate
-                    const best = cands.find(shown);
+                    const best = getFakeCandidates().find(shown);
                     if (best) {
                         best.focus?.();
-                        best.dispatchEvent(new KeyboardEvent('keydown',{key:' ',code:'Space',bubbles:true,cancelable:true}));
-                        best.dispatchEvent(new KeyboardEvent('keyup',{key:' ',code:'Space',bubbles:true,cancelable:true}));
-                        await sleep(120);
+                        best.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+                        best.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
+                        await sleepLocal(120);
                         if (isOpen()) return true;
-                        best.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true,cancelable:true}));
-                        best.dispatchEvent(new KeyboardEvent('keyup',{key:'Enter',code:'Enter',bubbles:true,cancelable:true}));
-                        for (let i=0;i<10;i++){ if (isOpen()) return true; await sleep(60); }
+                        best.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+                        best.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+                        for (let i = 0; i < 10; i++) { if (isOpen()) return true; await sleepLocal(60); }
                     }
                     return false;
                 };
-
-                for (let attempt=1; attempt<=3 && !isOpen(); attempt++) {
+                for (let attempt = 1; attempt <= 3 && !isOpen(); attempt++) {
                     if (await tryOnce()) break;
-                    await sleep(150 + attempt*100);
+                    await sleepLocal(150 + attempt * 100);
                 }
                 return isOpen();
             }
 
-            if (!(await openPickerRobust())) {
-                console.error('[dateRange] dropdown did not open');
+            if (!(await openPicker())) {
+                console.error('[dateRange] Picker did not open');
                 return false;
             }
+            await sleepLocal(400);
 
-            // ---- PANE-AWARE CALENDAR CLICKS ----
-            const dd = document.querySelector('.ui-duration-field__dropdown');
-            const controls = dd.querySelector('.ui-duration-field__controls');
-            const leftSpan  = controls?.querySelector('div:nth-of-type(1) span');
-            const rightSpan = controls?.querySelector('div:nth-of-type(2) span');
-            const startYearInput = controls?.querySelector('#'+START_YR_ID);
-            const endYearInput   = controls?.querySelector('#'+END_YR_ID);
-            const prevBtn = controls?.querySelector('a[role="button"]:first-of-type');
-            const nextBtn = controls?.querySelector('a[role="button"]:last-of-type');
+            const MONTH_NAMES = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+            const monthNameToIdx = (name) => MONTH_NAMES.indexOf(String(name || '').trim().toLowerCase());
+            let calendarFlowDone = false;
 
-            const calendarsWrap = dd.querySelector('.ui-duration-field__calendars');
-            const leftCal  = calendarsWrap?.querySelector('.ui-calendar:nth-of-type(1)');
-            const rightCal = calendarsWrap?.querySelector('.ui-calendar:nth-of-type(2)');
-
-            if (!controls || !leftSpan || !rightSpan || !leftCal || !rightCal || !prevBtn || !nextBtn) {
-                console.error('[dateRange] expected calendar structure not found');
-                return false;
-            }
-
-            const monthIdx = (name) => ['january','february','march','april','may','june','july','august','september','october','november','december']
-                .indexOf(String(name||'').trim().toLowerCase());
-
-            const getVisibleRangeAbs = () => {
-                const lMonth = monthIdx(leftSpan.textContent);
-                const rMonth = monthIdx(rightSpan.textContent);
-                const lYear = parseInt(startYearInput?.value || '0', 10);
-                const rYear = parseInt(endYearInput?.value   || '0', 10);
-                return {
-                    left:  lYear * 12 + lMonth,
-                    right: rYear * 12 + rMonth,
-                    lMonth, rMonth, lYear, rYear
-                };
-            };
-
-            const ensureMonthVisible = async (date) => {
-                const targetAbs = date.getFullYear()*12 + date.getMonth();
-                for (let i=0; i<36; i++) {
-                    const {left, right} = getVisibleRangeAbs();
-                    if (targetAbs >= left && targetAbs <= right) return true;
-                    if (targetAbs < left) { M(prevBtn,'click'); }
-                    else if (targetAbs > right) { M(nextBtn,'click'); }
-                    await sleep(110);
+            // Path 1: duration-field two calendars
+            const durationDd = dr.durationDropdown && document.querySelector(dr.durationDropdown);
+            if (durationDd) {
+                const leftCal = dr.durationCalLeft && durationDd.querySelector(dr.durationCalLeft);
+                const rightCal = dr.durationCalRight && durationDd.querySelector(dr.durationCalRight);
+                if (leftCal && rightCal) {
+                    const getVis = (ddEl) => {
+                        const spans = ddEl.querySelectorAll('.ui-duration-field__controls div span');
+                        const sy = ddEl.querySelector('#' + (dr.durationStartYearId || 'provided-service-dates-start-year'));
+                        const ey = ddEl.querySelector('#' + (dr.durationEndYearId || 'provided-service-dates-end-year'));
+                        const lM = spans[0] ? monthNameToIdx(spans[0].textContent) : -1;
+                        const rM = spans[1] ? monthNameToIdx(spans[1].textContent) : -1;
+                        const lY = parseInt(sy?.value || '0', 10);
+                        const rY = parseInt(ey?.value || '0', 10);
+                        return [{ monthIdx: lM, year: lY }, { monthIdx: rM, year: rY }];
+                    };
+                    const ensureMonth = async (targetMonthIdx, targetYear) => {
+                        const prev = durationDd.querySelector(dr.durationPrev);
+                        const next = durationDd.querySelector(dr.durationNext);
+                        if (!prev || !next) return false;
+                        const targetAbs = targetYear * 12 + targetMonthIdx;
+                        for (let i = 0; i < 36; i++) {
+                            const vis = getVis(durationDd);
+                            if (!vis) return false;
+                            const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
+                            const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
+                            if (targetAbs >= leftAbs && targetAbs <= rightAbs) return true;
+                            if (targetAbs < leftAbs) await clickHumanAsync(prev, 25);
+                            else await clickHumanAsync(next, 25);
+                            await sleepLocal(300);
+                        }
+                        return false;
+                    };
+                    const clickDayInPane = async (pane, dayNum) => {
+                        const want = String(dayNum);
+                        const cells = pane.querySelectorAll(dr.durationDayButton || '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]');
+                        const btn = Array.from(cells).find(b => (b.textContent || '').trim() === want);
+                        if (!btn) return false;
+                        await clickHumanAsync(btn, 25);
+                        await sleepLocal(200);
+                        return true;
+                    };
+                    const pickPane = (vis, targetAbs) => {
+                        const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
+                        const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
+                        return targetAbs === leftAbs ? leftCal : targetAbs === rightAbs ? rightCal : leftCal;
+                    };
+                    if (await ensureMonth(bStart.getMonth(), bStart.getFullYear())) {
+                        const vis = getVis(durationDd);
+                        const pane = pickPane(vis, bStart.getFullYear() * 12 + bStart.getMonth());
+                        const startOk = await clickDayInPane(pane, bStart.getDate());
+                        if (startOk && await ensureMonth(bEnd.getMonth(), bEnd.getFullYear())) {
+                            const vis2 = getVis(durationDd);
+                            const pane2 = pickPane(vis2, bEnd.getFullYear() * 12 + bEnd.getMonth());
+                            const endOk = await clickDayInPane(pane2, bEnd.getDate());
+                            if (endOk) {
+                                for (let i = 0; i < 25; i++) {
+                                    if (!(durationDd.offsetParent !== null || (durationDd.getBoundingClientRect?.().height || 0) > 0)) break;
+                                    await sleepLocal(80);
+                                }
+                                const triggerBtn = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
+                                if (triggerBtn && shown(triggerBtn)) { await clickHumanAsync(triggerBtn, 25); await sleepLocal(200); }
+                                calendarFlowDone = true;
+                                return true;
+                            }
+                        }
+                    }
                 }
-                return false;
-            };
+            }
 
-            const clickDayInPane = async (pane, date) => {
-                const want = String(date.getDate());
-                const btns = Array.from(pane.querySelectorAll('.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]'));
-                const btn = btns.find(b => (b.textContent || '').trim() === want);
-                if (!btn) return false;
-                M(btn,'mousedown'); M(btn,'mouseup'); M(btn,'click');
-                await sleep(140);
+            // Path 2: date-field two calendars
+            if (!calendarFlowDone && dr.dropdownClass) {
+                const dateFieldDd = document.querySelector(dr.dropdownClass);
+                if (dateFieldDd) {
+                    const calSelector = dr.dateFieldCalendars || '.ui-calendar';
+                    const calendars = dateFieldDd.querySelectorAll(calSelector);
+                    const leftCalDf = calendars.length >= 2 ? calendars[0] : null;
+                    const rightCalDf = calendars.length >= 2 ? calendars[1] : null;
+                    if (leftCalDf && rightCalDf) {
+                        const controlsSel = dr.dateFieldControls || '.ui-date-field__controls';
+                        const spansSel = controlsSel + ' div span';
+                        const yearStartId = dr.durationStartYearId || 'provided-service-dates-start-year';
+                        const yearEndId = dr.durationEndYearId || 'provided-service-dates-end-year';
+                        const getVisDf = (ddEl) => {
+                            const spans = ddEl.querySelectorAll(spansSel);
+                            const sy = document.getElementById(yearStartId) || ddEl.querySelector('#' + yearStartId);
+                            const ey = document.getElementById(yearEndId) || ddEl.querySelector('#' + yearEndId);
+                            const lM = spans[0] ? monthNameToIdx(spans[0].textContent) : -1;
+                            const rM = spans[1] ? monthNameToIdx(spans[1].textContent) : -1;
+                            const lY = parseInt(sy?.value || '0', 10);
+                            const rY = parseInt(ey?.value || '0', 10);
+                            return [{ monthIdx: lM, year: lY }, { monthIdx: rM, year: rY }];
+                        };
+                        const prevDf = dateFieldDd.querySelector(dr.navPrev);
+                        const nextDf = dateFieldDd.querySelector(dr.navNext);
+                        const ensureMonthDf = async (targetMonthIdx, targetYear) => {
+                            if (!prevDf || !nextDf) return false;
+                            const targetAbs = targetYear * 12 + targetMonthIdx;
+                            for (let i = 0; i < 36; i++) {
+                                const vis = getVisDf(dateFieldDd);
+                                if (!vis || vis[0].monthIdx < 0) return false;
+                                const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
+                                const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
+                                if (targetAbs >= leftAbs && targetAbs <= rightAbs) return true;
+                                if (targetAbs < leftAbs) await clickHumanAsync(prevDf, 25);
+                                else await clickHumanAsync(nextDf, 25);
+                                await sleepLocal(300);
+                            }
+                            return false;
+                        };
+                        const dayBtnSel = dr.durationDayButton || '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]';
+                        const clickDayInPaneDf = async (pane, dayNum) => {
+                            const want = String(dayNum);
+                            const cells = pane.querySelectorAll(dayBtnSel);
+                            const btn = Array.from(cells).find(b => (b.textContent || '').trim() === want);
+                            if (!btn) return false;
+                            await clickHumanAsync(btn, 25);
+                            await sleepLocal(200);
+                            return true;
+                        };
+                        const pickPaneDf = (vis, targetAbs) => {
+                            const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
+                            const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
+                            return targetAbs === leftAbs ? leftCalDf : targetAbs === rightAbs ? rightCalDf : leftCalDf;
+                        };
+                        if (await ensureMonthDf(bStart.getMonth(), bStart.getFullYear())) {
+                            const vis = getVisDf(dateFieldDd);
+                            const pane = pickPaneDf(vis, bStart.getFullYear() * 12 + bStart.getMonth());
+                            const startOk = await clickDayInPaneDf(pane, bStart.getDate());
+                            if (startOk && await ensureMonthDf(bEnd.getMonth(), bEnd.getFullYear())) {
+                                const vis2 = getVisDf(dateFieldDd);
+                                const pane2 = pickPaneDf(vis2, bEnd.getFullYear() * 12 + bEnd.getMonth());
+                                const endOk = await clickDayInPaneDf(pane2, bEnd.getDate());
+                                if (endOk) {
+                                    for (let i = 0; i < 25; i++) {
+                                        if (!(dateFieldDd.offsetParent !== null || (dateFieldDd.getBoundingClientRect?.().height || 0) > 0)) break;
+                                        await sleepLocal(80);
+                                    }
+                                    const triggerBtn = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
+                                    if (triggerBtn && shown(triggerBtn)) { await clickHumanAsync(triggerBtn, 25); await sleepLocal(200); }
+                                    calendarFlowDone = true;
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Path 3: start/end text inputs
+            const startInput = (dr.startInputId && document.getElementById(dr.startInputId)) || (dr.startInputXpath && byXPath(dr.startInputXpath));
+            const endInput = (dr.endInputId && document.getElementById(dr.endInputId)) || (dr.endInputXpath && byXPath(dr.endInputXpath));
+            if (!calendarFlowDone && startInput && endInput) {
+                const toMDYLocal = (d) => {
+                    const mm = String(d.getMonth() + 1).padStart(2, '0');
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    return mm + '/' + dd + '/' + d.getFullYear();
+                };
+                const pressKey = (el, key, code, keyCode) => {
+                    const opts = { key, code, keyCode, which: keyCode, view: window, bubbles: true, cancelable: true };
+                    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                    el.dispatchEvent(new KeyboardEvent('keypress', { ...opts, charCode: keyCode }));
+                    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+                };
+                startInput.focus();
+                await sleepLocal(100);
+                setNativeValue(startInput, fmtMDY(bStart));
+                fire(startInput, 'input');
+                fire(startInput, 'change');
+                await sleepLocal(100);
+                pressKey(startInput, 'Tab', 'Tab', 9);
+                await sleepLocal(200);
+                endInput.focus();
+                await sleepLocal(100);
+                setNativeValue(endInput, fmtMDY(bEnd));
+                fire(endInput, 'input');
+                fire(endInput, 'change');
+                await sleepLocal(100);
+                pressKey(endInput, 'Tab', 'Tab', 9);
+                await sleepLocal(200);
                 return true;
-            };
-
-            // Select START
-            if (!(await ensureMonthVisible(bStart))) { console.error('[dateRange] could not show START month'); return false; }
-            let vis = getVisibleRangeAbs();
-            let ok = false;
-            if (vis.lYear === bStart.getFullYear() && vis.lMonth === bStart.getMonth()) {
-                ok = await clickDayInPane(leftCal, bStart);
-            } else if (vis.rYear === bStart.getFullYear() && vis.rMonth === bStart.getMonth()) {
-                ok = await clickDayInPane(rightCal, bStart);
-            } else {
-                if (bStart.getFullYear()*12 + bStart.getMonth() < vis.left) M(prevBtn,'click'); else M(nextBtn,'click');
-                await sleep(120);
-                vis = getVisibleRangeAbs();
-                if (vis.lYear === bStart.getFullYear() && vis.lMonth === bStart.getMonth()) ok = await clickDayInPane(leftCal, bStart);
-                else if (vis.rYear === bStart.getFullYear() && vis.rMonth === bStart.getMonth()) ok = await clickDayInPane(rightCal, bStart);
             }
-            if (!ok) { console.error('[dateRange] could not click START day'); return false; }
 
-            // Select END
-            if (!(await ensureMonthVisible(bEnd))) { console.error('[dateRange] could not show END month'); return false; }
-            vis = getVisibleRangeAbs();
-            ok = false;
-            if (vis.lYear === bEnd.getFullYear() && vis.lMonth === bEnd.getMonth()) {
-                ok = await clickDayInPane(leftCal, bEnd);
-            } else if (vis.rYear === bEnd.getFullYear() && vis.rMonth === bEnd.getMonth()) {
-                ok = await clickDayInPane(rightCal, bEnd);
-            } else {
-                if (bEnd.getFullYear()*12 + bEnd.getMonth() < vis.left) M(prevBtn,'click'); else M(nextBtn,'click');
-                await sleep(120);
-                vis = getVisibleRangeAbs();
-                if (vis.lYear === bEnd.getFullYear() && vis.lMonth === bEnd.getMonth()) ok = await clickDayInPane(leftCal, bEnd);
-                else if (vis.rYear === bEnd.getFullYear() && vis.rMonth === bEnd.getMonth()) ok = await clickDayInPane(rightCal, bEnd);
-            }
-            if (!ok) { console.error('[dateRange] could not click END day'); return false; }
-
-            // Let widget close itself; treat label only as a hint (UI may format differently)
-            for (let i=0;i<20 && isOpen(); i++) await sleep(80);
-            const wantTxt = `${String(bStart.getMonth()+1).padStart(2,'0')}/${String(bStart.getDate()).padStart(2,'0')}/${bStart.getFullYear()} - ${String(bEnd.getMonth()+1).padStart(2,'0')}/${String(bEnd.getDate()).padStart(2,'0')}/${bEnd.getFullYear()}`;
-            const labelNow = (document.getElementById(RANGE_BTN_ID)?.textContent || '').trim();
-            if (labelNow === wantTxt) {
-                console.log('[dateRange] applied via pane-aware calendar clicks:', labelNow);
-            } else {
-                console.warn('[dateRange] label mismatch (UI may format differently):', { wantTxt, labelNow });
-            }
-            return true;
+            return false;
         }
 
 
@@ -790,7 +913,24 @@
                 return;
             }
         } else {
-            // ===== Multi-day: Click date range button and use date range picker =====
+            // ===== Multi-day: Select "Date Range" radio then use date range picker (same order as server) =====
+            const period = sel.periodOfService || {};
+            const dateRangeRadioId = period.dateRangeRadioId || 'provided-service-period-of-service-1';
+            const dateRangeRadio = document.getElementById(dateRangeRadioId) ||
+                document.querySelector('input[name="provided_service.period_of_service"][value="Date Range"]') ||
+                (() => {
+                    const label = document.getElementById(period.dateRangeLabelId || 'Date Range-label') ||
+                        Array.from(document.querySelectorAll('label')).find(l => (l.textContent || '').trim() === 'Date Range');
+                    return label ? document.getElementById(label.getAttribute('for')) : null;
+                })();
+            if (dateRangeRadio && !dateRangeRadio.checked) {
+                console.log('[enterBillingDetails] Selecting "Date Range" radio…');
+                clickLikeHuman(dateRangeRadio);
+                await sleep(400);
+                const labelForRadio = document.querySelector('label[for="' + dateRangeRadioId + '"]');
+                if (labelForRadio && !dateRangeRadio.checked) clickLikeHuman(labelForRadio);
+                await sleep(300);
+            }
             const okRange = await setDateRangeRobust(billStart, billEnd);
             if (!okRange) {
                 console.warn('[enterBillingDetails] Date range entry did not confirm; continuing.');
@@ -1162,24 +1302,22 @@
                 console.log('[enterBillingDetails] ✅ PDF uploaded successfully');
 
                 // NOW submit the form AFTER successful upload
-                // COMMENTED OUT FOR TESTING
-                console.log('[enterBillingDetails] Submit button clicking commented out for testing');
-                // console.log('[enterBillingDetails] Now submitting form...');
-                // await sleep(500); // Wait for upload dialog to close
+                console.log('[enterBillingDetails] Now submitting form...');
+                await sleep(500); // Wait for upload dialog to close
 
-                // const submitSuccess = await submit();
-                // if (!submitSuccess) {
-                //     console.error('[enterBillingDetails] Submit failed after upload');
-                //     window.__billingResult = {
-                //         ok: true,
-                //         actualStart: fmtMDY(billStart),
-                //         actualEnd: fmtMDY(billEnd),
-                //         actualAmount: amount,
-                //         uploadSuccess: true,
-                //         submitFailed: true
-                //     };
-                //     return;
-                // }
+                const submitSuccess = await submit();
+                if (!submitSuccess) {
+                    console.error('[enterBillingDetails] Submit failed after upload');
+                    window.__billingResult = {
+                        ok: true,
+                        actualStart: fmtMDY(billStart),
+                        actualEnd: fmtMDY(billEnd),
+                        actualAmount: amount,
+                        uploadSuccess: true,
+                        submitFailed: true
+                    };
+                    return;
+                }
 
                 window.__billingResult = {
                     ok: true,
@@ -1187,7 +1325,7 @@
                     actualEnd: fmtMDY(billEnd),
                     actualAmount: amount,
                     uploadSuccess: true,
-                    submitted: false // Changed to false since we're not submitting
+                    submitted: true
                 };
 
             } catch (uploadErr) {
@@ -1202,14 +1340,16 @@
                 };
             }
         } else {
-            console.log('[enterBillingDetails] Upload not requested or no signature');
+            console.log('[enterBillingDetails] Upload not requested or no signature — submitting form.');
+            const submitSuccess = await submit();
             window.__billingResult = {
                 ok: true,
                 actualStart: fmtMDY(billStart),
                 actualEnd: fmtMDY(billEnd),
                 actualAmount: amount,
                 uploadSkipped: true,
-                uploadReason: shouldUpload ? 'No signature' : 'Upload not enabled'
+                uploadReason: shouldUpload ? 'No signature' : 'Upload not enabled',
+                submitted: !!submitSuccess
             };
         }
     } catch (err) {

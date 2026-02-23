@@ -5,7 +5,7 @@
         `https://app.uniteus.io/dashboard/cases/open/${encodeURIComponent(caseId)}/contact/${encodeURIComponent(clientId)}`;
 
     // UniteUs “ready” XPath
-    const READY_XP = '//*[@id="container"]/div[2]/main/div/section/div';
+    const READY_XP = (typeof window !== 'undefined' && window.UNITE_SELECTORS && window.UNITE_SELECTORS.billing && window.UNITE_SELECTORS.billing.pageReady && window.UNITE_SELECTORS.billing.pageReady.xpath) || '//*[@id="container"]/div[2]/main/div/section/div';
 
     // Timings
     const BILLING_GRACE_MS = 1500;         // short grace after injection (1.5s)
@@ -357,6 +357,8 @@
     async function injectBillingModuleIIFE() {
         const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab?.id) throw new Error("No active tab");
+        // Selectors must be in page first so enterBillingDetails uses window.UNITE_SELECTORS
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["modules/uniteSelectors.js"] });
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["modules/enterBillingDetails.js"] });
     }
 

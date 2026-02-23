@@ -396,6 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             setStatus('Injecting billing script…');
             await setBillingArgsOnPage({ start: toMDY(startISO), end: toMDY(endISO), ratePerDay });
+            await injectFile('modules/uniteSelectors.js');
             await injectFile('modules/enterBillingDetails.js');
             setStatus('Billing injected', 'success');
             log('Billing injected successfully.');

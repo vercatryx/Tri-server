@@ -19,6 +19,7 @@ async function getActiveTab() {
 
 // ---------- auto-inject content scripts (from modules/) ----------
 const INJECT_FILES = [
+    "modules/uniteSelectors.js",  // source of truth for element selectors; must run first
     "modules/personInfo.js",
     "modules/uploadpdf.js",
     "modules/attestationFlow.js",

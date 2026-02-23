@@ -416,6 +416,8 @@ async function tryInject(tabId, candidates) {
 
 async function ensureInjected(tabId) {
     await ensureHttpTab(tabId);
+    // Selectors first (source of truth for elements) so other modules can use window.UNITE_SELECTORS
+    await tryInject(tabId, ["modules/uniteSelectors.js"]);
     // Router first
     await tryInject(tabId, ["modules/dispatcher.js", "dispatcher.js"]);
     // Person info reader
@@ -707,44 +709,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 }
             }
 
-            // --- Check auth info on page ---
+            // --- Check auth info on page (uses window.UNITE_SELECTORS when present) ---
             if (msg.type === "CHECK_AUTH_INFO") {
                 const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                await ensureInjected(tabId); // so window.UNITE_SELECTORS is available
                 const results = await chrome.scripting.executeScript({
                     target: { tabId },
                     func: () => {
                         console.log('[AUTH CHECK] Looking for auth elements...');
-                        const byXPath = (xp) => document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-
-                        // Try CSS selector first
-                        let amountEl = document.querySelector('#basic-table-authorized-amount-value');
-                        let datesEl = document.querySelector('#basic-table-authorized-service-delivery-date-s-value');
-
-                        // If not found, try XPath
-                        if (!amountEl) {
-                            amountEl = byXPath('//*[@id="basic-table-authorized-amount-value"]');
-                        }
-                        if (!datesEl) {
-                            datesEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]/div/table/tbody/tr[3]/td[2]');
-                        }
-
-                        console.log('[AUTH CHECK] amountEl:', amountEl);
-                        console.log('[AUTH CHECK] datesEl:', datesEl);
-
+                        const byXPath = (xp) => xp && document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                        const auth = (typeof window !== 'undefined' && window.UNITE_SELECTORS && window.UNITE_SELECTORS.billing && window.UNITE_SELECTORS.billing.authorizedTable) || null;
+                        const aid = auth ? auth.amount.id : 'basic-table-authorized-amount-value';
+                        const did = auth ? auth.date.id : 'basic-table-authorized-service-delivery-date-s-value';
+                        const axp = auth && auth.amount.xpath ? auth.amount.xpath : '//*[@id="basic-table-authorized-amount-value"]';
+                        const dxp = auth && auth.date.xpath ? auth.date.xpath : '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]/div/table/tbody/tr[3]/td[2]';
+                        let amountEl = document.querySelector('#' + aid);
+                        let datesEl = document.querySelector('#' + did);
+                        if (!amountEl) amountEl = byXPath(axp);
+                        if (!datesEl) datesEl = byXPath(dxp);
+                        console.log('[AUTH CHECK] amountEl:', !!amountEl, 'datesEl:', !!datesEl);
                         if (amountEl && datesEl) {
-                            // Get text from span child if it exists
                             const amountSpan = amountEl.querySelector('span');
-                            const amountText = amountSpan ? amountSpan.textContent : amountEl.textContent;
-
-                            const result = {
-                                found: true,
-                                authorizedAmount: amountText.trim(),
-                                authorizedDates: datesEl.textContent.trim()
-                            };
-                            console.log('[AUTH CHECK] ✅ Found auth info:', result);
+                            const amountText = (amountSpan ? amountSpan.textContent : amountEl.textContent) || '';
+                            const result = { found: true, authorizedAmount: amountText.trim(), authorizedDates: (datesEl.textContent || '').trim() };
+                            console.log('[AUTH CHECK] ✅ Found auth info');
                             return result;
                         }
-
                         console.log('[AUTH CHECK] ❌ Auth elements not found');
                         return { found: false };
                     }
@@ -877,6 +867,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     sendResponse({ ok: false, error: e?.message || String(e) });
                     return;
                 }
+            }
+
+            // --- Billing: inject params + enterBillingDetails (selectors injected first) ---
+            if (msg.type === "INJECT_BILLING_SCRIPT") {
+                (async () => {
+                    try {
+                        const tabId = await ensureHttpTab(await resolveTabId(msg.tabId, sender));
+                        await ensureInjected(tabId); // injects uniteSelectors first
+                        await chrome.scripting.executeScript({
+                            target: { tabId },
+                            func: (incoming) => { window.__BILLING_INPUTS__ = incoming; },
+                            args: [msg.billingParams || {}],
+                        });
+                        await chrome.scripting.executeScript({
+                            target: { tabId },
+                            files: ['modules/enterBillingDetails.js'],
+                        });
+                        let billingResp = null;
+                        const t0 = Date.now();
+                        while (Date.now() - t0 < 12000) {
+                            const [result] = await chrome.scripting.executeScript({
+                                target: { tabId },
+                                func: () => window.__billingResult || null,
+                            });
+                            if (result?.result) {
+                                billingResp = result.result;
+                                await chrome.scripting.executeScript({ target: { tabId }, func: () => { delete window.__billingResult; } });
+                                break;
+                            }
+                            await new Promise(r => setTimeout(r, 200));
+                        }
+                        sendResponse(billingResp || { ok: false, error: 'Billing timeout: No result after 12s' });
+                    } catch (e) {
+                        sendResponse({ ok: false, error: e?.message || String(e) });
+                    }
+                })();
+                return true;
             }
 
             // --- manual actions: ensure inject + forward to page ---
