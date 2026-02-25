@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-require('dotenv').config(); // Load environment variables properly
 const { execSync } = require('child_process');
 const { spawn } = require('child_process');
 
@@ -11,32 +10,30 @@ console.log(`Checking for processes on port ${PORT}...`);
 try {
     // Find processes using the port
     const pids = execSync(`lsof -ti:${PORT}`, { encoding: 'utf8' }).trim();
-
+    
     if (pids) {
         console.log(`Found processes on port ${PORT}: ${pids}`);
-        console.log('Killing processes with force...');
-
-        // Kill each process with -9 (force kill)
+        console.log('Killing processes...');
+        
+        // Kill each process
         pids.split('\n').forEach(pid => {
-            if (pid.trim()) {
-                try {
-                    execSync(`kill -9 ${pid.trim()}`);
-                } catch (e) {
-                    // Process might already be dead, ignore
-                }
+            try {
+                execSync(`kill ${pid.trim()}`);
+            } catch (e) {
+                // Process might already be dead, ignore
             }
         });
-
+        
         // Wait a moment for cleanup
         setTimeout(() => {
             startServer();
-        }, 1000); // Reduced wait time slightly since we forced kill
+        }, 2000);
     } else {
         console.log(`No processes found on port ${PORT}.`);
         startServer();
     }
 } catch (e) {
-    // No processes found (lsof returns error when no matches), that's fine
+    // No processes found, that's fine
     console.log(`No processes found on port ${PORT}.`);
     startServer();
 }
@@ -47,12 +44,12 @@ function startServer() {
         stdio: 'inherit',
         shell: true
     });
-
+    
     server.on('error', (err) => {
         console.error('Failed to start server:', err);
         process.exit(1);
     });
-
+    
     // Handle Ctrl+C
     process.on('SIGINT', () => {
         console.log('\nShutting down server...');

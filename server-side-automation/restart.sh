@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # Kill any process using port 3500
 echo "Checking for processes on port 3500..."
 PIDS=$(lsof -ti:3500)

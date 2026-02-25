@@ -1,8 +1,8 @@
 const { performLoginSequence } = require('./auth');
 const axios = require('axios');
 const { executeBillingOnPage } = require('./billingActions');
-const { getPage, restartBrowser } = require('./browser');
-const uniteSelectors = require('../uniteSelectors');
+const uniteSelectors = require('./uniteSelectors');
+const { getPage, getContext, closeBrowser, restartBrowser, BROWSER_COUNT } = require('./browser');
 const fs = require('fs');
 const path = require('path');
 
@@ -15,21 +15,108 @@ const PASSWORD = process.env.UNITEUS_PASSWORD;
 const DEFAULT_API_BASE_URL = process.env.EXTENSION_API_BASE_URL || 'http://localhost:3000';
 const DEFAULT_API_KEY = process.env.EXTENSION_API_KEY || 'justtomakesureicanlockyouout';
 
-/** Parse structured error message from billing flow. Returns { step, type, details } for clear logging. */
-function parseBillingError(message) {
-    const msg = String(message || '');
-    const stepMatch = msg.match(/\[STEP:([^\]]+)\]/);
-    const typeMatch = msg.match(/\[TYPE:([^\]]+)\]/);
-    let details = msg
-        .replace(/\[STEP:[^\]]+\]\s*/, '')
-        .replace(/\[TYPE:[^\]]+\]\s*/, '')
-        .trim();
-    const step = stepMatch ? stepMatch[1] : (msg.includes('closed') || msg.includes('page.goto') ? 'navigation' : 'unknown');
-    const type = typeMatch ? typeMatch[1] : (msg.includes('closed') || msg.includes('has been closed') ? 'BROWSER_CLOSED' : (msg.includes('timeout') ? 'TIMEOUT' : 'UNKNOWN'));
-    return { step, type, details: details || msg };
+const TSS_BILLING_STATUS_URL = process.env.TSS_BILLING_STATUS_URL ||
+    'https://www.trianglesquareservices.com/api/update-order-billing-status';
+const TSS_API_KEY = process.env.TSS_API_KEY || null;
+
+const TSS_BILLING_REQUESTS_URL = process.env.TSS_BILLING_REQUESTS_URL ||
+    'https://www.trianglesquareservices.com/api/billing-requests-by-week';
+
+/**
+ * Retry hierarchy: 5 attempts (wait 2s between) → 3 refresh cycles → 2 restart cycles.
+ * Only report failure to API after all retries exhausted. Env overrides:
+ *   BILLING_ATTEMPTS_PER_CYCLE, BILLING_REFRESH_CYCLES, BILLING_RESTART_CYCLES, BILLING_SLEEP_ON_ERROR_MS
+ */
+const ATTEMPTS_PER_CYCLE = Math.max(1, parseInt(process.env.BILLING_ATTEMPTS_PER_CYCLE || '5', 10));
+const REFRESH_CYCLES = Math.max(1, parseInt(process.env.BILLING_REFRESH_CYCLES || '3', 10));
+const RESTART_CYCLES = Math.max(1, parseInt(process.env.BILLING_RESTART_CYCLES || '2', 10));
+const SLEEP_ON_ERROR_MS = Math.max(0, parseInt(process.env.BILLING_SLEEP_ON_ERROR_MS || '2000', 10));
+
+/**
+ * Retries apply only to transient failures (DOM/timing). Logic/business errors fail immediately.
+ * Retryable: Add button missing, shelf not open, date picker, Place of Service, submit button, etc.
+ * Non-retryable: missing proofs, auth amount too low, invalid dates, duplicate, missing amount, etc.
+ */
+function isRetryableError(err) {
+    if (!err || typeof err !== 'string') return false;
+    const s = err.toLowerCase();
+    if (s.includes('duplicate')) return false;
+    if (s.includes('proof') || s.includes('upload proof')) return false;
+    if (s.includes('missing "amount"') || s.includes('missing amount')) return false;
+    if (s.includes('invalid date') || s.includes('clamped dates invalid') || s.includes('date range')) return false;
+    if (s.includes('auth') && (s.includes('amount') || s.includes('too low') || s.includes('exceed'))) return false;
+    if (s.includes('add button not found') || s.includes('shelf trigger')) return true;
+    if (s.includes('shelf did not open')) return true;
+    if (s.includes('amount field missing')) return true;
+    if (s.includes('failed to set date range')) return true;
+    if (s.includes('failed to select place of service')) return true;
+    if (s.includes('submit button') && s.includes('not found')) return true;
+    return false;
+}
+
+/**
+ * Only these reasons are sent to the API as billing_failed. All other failures are left
+ * with their current status so the order can be retried later.
+ */
+function isPermanentFailure(message) {
+    if (!message || typeof message !== 'string') return false;
+    const s = message.toLowerCase();
+    if (s.includes('duplicate')) return true;
+    if (s.includes('proof') || s.includes('upload proof')) return true;
+    if (s.includes('missing "amount"') || s.includes('missing amount') || s.includes('missing date')) return true;
+    if (s.includes('invalid date') || s.includes('clamped dates invalid') || s.includes('date range')) return true;
+    if (s.includes('auth') && (s.includes('amount') || s.includes('too low') || s.includes('exceed'))) return true;
+    return false;
 }
 
 // --- Helpers for API ---
+/**
+ * Fetch billing requests from Triangle Square Services API
+ * @param {Object} config - Optional config (currently unused, kept for compatibility)
+ * @returns {Promise<Array>} Array of billing requests
+ */
+async function fetchRequestsFromTSS(config) {
+    console.log(`[TSS API] GET ${TSS_BILLING_REQUESTS_URL}`);
+
+    try {
+        const headers = {};
+        if (TSS_API_KEY) {
+            headers['Authorization'] = `Bearer ${TSS_API_KEY}`;
+        }
+
+        const res = await axios.get(TSS_BILLING_REQUESTS_URL, { headers });
+
+        let requests = null;
+        if (Array.isArray(res.data)) {
+            requests = res.data;
+        } else if (res.data && Array.isArray(res.data.billingRequests)) {
+            requests = res.data.billingRequests;
+        }
+
+        if (!requests) {
+            console.error('[TSS API] Unexpected response format:', typeof res.data);
+            if (typeof res.data === 'string' && res.data.trim().startsWith('<')) {
+                throw new Error('Received HTML instead of JSON. Check API URL.');
+            }
+            throw new Error(`Expected array or { billingRequests: array }, got ${typeof res.data}`);
+        }
+
+        console.log(`[TSS API] Fetched ${requests.length} billing requests`);
+        return requests;
+    } catch (err) {
+        console.error('[TSS API] Fetch Error:', err.message);
+        if (err.response) {
+            console.error('[TSS API] Response Status:', err.response.status);
+            console.error('[TSS API] Response Data:', JSON.stringify(err.response.data).substring(0, 200));
+        }
+        throw err;
+    }
+}
+
+/**
+ * Legacy function for extension API (kept for backward compatibility)
+ * @deprecated Use fetchRequestsFromTSS instead
+ */
 async function fetchRequestsFromApi(config) {
     const baseUrl = config?.baseUrl || DEFAULT_API_BASE_URL;
     const key = config?.key || DEFAULT_API_KEY;
@@ -63,174 +150,9 @@ async function fetchRequestsFromApi(config) {
     }
 }
 
-/**
- * Scrapes authorization details (Date Opened, Authorized End Date, Max Amount) from the UniteUs page.
- */
-async function fetchAuthDetailsFromPage(page) {
-    console.log('[Worker] Scraping auth details from page...');
-    const authSel = uniteSelectors.billing.authorizedTable;
-    try {
-        const auth = await page.evaluate((authSel) => {
-            const byXPath = (xp) =>
-                document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue || null;
-            const norm = (s) => String(s || "").trim();
-
-            let datesEl = document.querySelector('#' + authSel.date.id);
-            if (!datesEl && authSel.date.xpath) datesEl = byXPath(authSel.date.xpath);
-
-            let dateOpenedEl = document.querySelector('#' + authSel.dateOpened.id);
-            if (!dateOpenedEl && authSel.dateOpened.xpath) dateOpenedEl = byXPath(authSel.dateOpened.xpath);
-
-            let amountEl = document.querySelector('#' + authSel.amount.id);
-            if (!amountEl && authSel.amount.xpath) amountEl = byXPath(authSel.amount.xpath);
-
-            const datesText = norm(datesEl?.textContent);
-            const dateOpenedP = dateOpenedEl?.querySelector('p.service-case-program-entry__text');
-            const dateOpenedText = norm(dateOpenedP ? dateOpenedP.textContent : dateOpenedEl?.textContent);
-            const amountText = norm(amountEl?.textContent);
-
-            return {
-                authorizedDates: datesText,
-                dateOpened: dateOpenedText,
-                authorizedAmount: amountText
-            };
-        }, authSel);
-        console.log('[Worker] Scraped auth details:', auth);
-        return auth;
-    } catch (err) {
-        console.error('[Worker] Failed to scrape auth details:', err.message);
-        return { authorizedDates: "", dateOpened: "", authorizedAmount: "" };
-    }
-}
-
-/**
- * Scrapes client details (name, phone, address) from the UniteUs page.
- * Ported from personInfo.js logic.
- */
-async function fetchClientDetailsFromPage(page) {
-    console.log('[Worker] Scraping client details from page...');
-    try {
-        // Wait for name to appear at least
-        try {
-            await page.waitForSelector('.contact-column__name', { timeout: 10000 });
-        } catch (e) {
-            console.warn('[Worker] Name selector not found, attempting to scrape anyway.');
-        }
-
-        const details = await page.evaluate(() => {
-            const norm = (s) => String(s || "").trim();
-            const digits = (s) => String(s || "").replace(/\D+/g, "");
-
-            function parseName() {
-                const h = document.querySelector(".contact-column__name");
-                return norm(h?.textContent) || "";
-            }
-
-            function parsePhone() {
-                const span = document.querySelector("[data-test-element='phone-numbers_number_0']");
-                let raw = norm(span?.textContent);
-                if (!raw) {
-                    const a = document.querySelector(".ui-contact-information__compact-phone a[href^='tel:']");
-                    raw = norm(a?.textContent || a?.getAttribute?.("href")?.replace(/^tel:/, ""));
-                }
-                const d = digits(raw);
-                if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
-                if (d.length === 11 && d.startsWith("1")) return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
-                return raw || "";
-            }
-
-            function parseAddress() {
-                const details = document.querySelector(".address .address__details");
-                if (details) {
-                    const ps = Array.from(details.querySelectorAll("p")).map(p => norm(p.textContent)).filter(Boolean);
-                    const filtered = ps.filter(line => !/^primary$/i.test(line) && !/county$/i.test(line));
-                    return filtered.join(", ").replace(/\s{2,}/g, " ").replace(/\s,/, ",");
-                }
-                const addrEl = document.querySelector(".address");
-                return norm(addrEl?.textContent).replace(/\s{2,}/g, " ") || "";
-            }
-
-            return {
-                name: parseName(),
-                phone: parsePhone(),
-                address: parseAddress()
-            };
-        });
-        console.log('[Worker] Scraped details:', details);
-        return details;
-    } catch (err) {
-        console.error('[Worker] Failed to scrape client details:', err.message);
-        return { name: "", phone: "", address: "" };
-    }
-}
-
-/**
- * Generates a proof URL (PDF as Data URI) using the Diet Fantasy API.
- */
-async function generateProofUrl(clientDetails, requestData, config) {
-    const baseUrl = config?.baseUrl || DEFAULT_API_BASE_URL;
-    const url = `${baseUrl}/api/ext/attestation`;
-
-    console.log(`[API] Generating attestation at ${url}`);
-
-    const payload = {
-        name: clientDetails.name || requestData.name || "Attestation",
-        phone: clientDetails.phone || "",
-        address: clientDetails.address || "",
-        deliveryDate: requestData.start, // Use start date as delivery date
-        startDate: requestData.start,
-        endDate: requestData.end,
-        attestationDate: new Date().toISOString().slice(0, 10),
-        userId: requestData.userId || requestData['client#'] || null,
-        clientId: requestData['client#'] || null
-    };
-
-    try {
-        const res = await axios.post(url, payload, {
-            responseType: 'arraybuffer'
-        });
-
-        const contentType = res.headers['content-type'] || 'application/pdf';
-        const base64 = Buffer.from(res.data).toString('base64');
-        return `data:${contentType};base64,${base64}`;
-    } catch (err) {
-        if (err.response && err.response.status === 404) {
-            console.error('[API] Attestation Generation: No file found (404). skipping.');
-            const error = new Error('[API] No attestation file available for this client');
-            error.code = 'NO_ATTESTATION_FILE';
-            throw error;
-        }
-        if (err.response && err.response.status === 409) {
-            console.error('[API] Attestation Generation: Conflict/No Signature (409). skipping.');
-            const error = new Error('[API] No signature available / Conflict detected');
-            error.code = 'NO_SIGNATURE';
-            throw error;
-        }
-        if (err.response && err.response.status === 422) {
-            let detail = 'Invalid request data';
-            try {
-                // If response is arraybuffer, we might need to decode it to see JSON error
-                if (err.response.data instanceof ArrayBuffer || Buffer.isBuffer(err.response.data)) {
-                    const str = Buffer.from(err.response.data).toString();
-                    const parsed = JSON.parse(str);
-                    detail = parsed.error || parsed.message || detail;
-                } else {
-                    detail = err.response.data?.error || err.response.data?.message || detail;
-                }
-            } catch (e) { /* ignore parse error */ }
-
-            console.error(`[API] Attestation Generation: Validation Error (422): ${detail}. skipping.`);
-            const error = new Error(`[API] Validation Failed: ${detail}`);
-            error.code = 'VALIDATION_ERROR';
-            throw error;
-        }
-        console.error('[API] Attestation Generation Error:', err.message);
-        throw err;
-    }
-}
-
+/** @returns {Promise<{ ok: boolean, error?: string }>} */
 async function updateOrderStatus(orderNumber, status, config) {
-    if (!orderNumber) return;
+    if (!orderNumber) return { ok: true };
     const baseUrl = config?.baseUrl || DEFAULT_API_BASE_URL;
     const key = config?.key || DEFAULT_API_KEY;
 
@@ -245,10 +167,63 @@ async function updateOrderStatus(orderNumber, status, config) {
                 'Content-Type': 'application/json'
             }
         });
-        console.log(`[API] Status updated.`);
+        console.log(`[API] Extension status updated.`);
+        return { ok: true };
     } catch (err) {
         console.error(`[API] Update Failed for #${orderNumber}:`, err.message);
+        return { ok: false, error: err.message };
     }
+}
+
+/**
+ * POST to Triangle Square Services API to update order billing status.
+ * Called after each billing person is complete.
+ * @param {string[]} orderIds - Array of order UUIDs
+ * @param {string} status - 'billing_successful' | 'billing_failed' | 'billing_unconfirmed'
+ * @param {string} billingNotes - Reason or notes (e.g. error message on failure)
+ * @returns {Promise<{ ok: boolean, error?: string }>}
+ */
+async function updateOrderBillingStatus(orderIds, status, billingNotes = '') {
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+        console.log('[TSS] No orderIds provided, skipping API update.');
+        return { ok: true };
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (TSS_API_KEY) headers['Authorization'] = `Bearer ${TSS_API_KEY}`;
+
+    const payload = {
+        orderIds,
+        status,
+        billingNotes: String(billingNotes || '').trim()
+    };
+
+    console.log(`[TSS] POST ${TSS_BILLING_STATUS_URL}`);
+    console.log(`[TSS] Headers:`, JSON.stringify(headers, null, 2));
+    console.log(`[TSS] Payload:`, JSON.stringify(payload, null, 2));
+    console.log(`[TSS] Updating ${orderIds.length} order(s) -> ${status}`);
+    
+    try {
+        const response = await axios.post(TSS_BILLING_STATUS_URL, payload, { headers });
+        console.log(`[TSS] Billing status updated successfully. Response status: ${response.status}`);
+        return { ok: true };
+    } catch (err) {
+        console.error(`[TSS] Update billing status failed:`, err.message);
+        if (err.response) {
+            console.error(`[TSS] Response Status: ${err.response.status}`);
+            console.error(`[TSS] Response Data:`, JSON.stringify(err.response.data)?.substring(0, 500));
+        }
+        if (err.request) {
+            console.error(`[TSS] Request made but no response received. URL: ${TSS_BILLING_STATUS_URL}`);
+        }
+        return { ok: false, error: err.message };
+    }
+}
+
+function getOrderIds(req) {
+    if (Array.isArray(req.orderIds) && req.orderIds.length > 0) return req.orderIds;
+    if (req.orderNumber != null && req.orderNumber !== '') return [String(req.orderNumber)];
+    return [];
 }
 
 /**
@@ -256,213 +231,256 @@ async function updateOrderStatus(orderNumber, status, config) {
  * @param {Array} requests - (Legacy) requests if passed directly, or null if using internal fetch
  * @param {function} emitEvent - Function to emit socket events
  * @param {string} source - 'file' (default) or 'api'
+ * @param {Object} apiConfig - API configuration (optional)
+ * @param {function} stopCheck - Function that returns true if the process should stop
  */
-async function billingWorker(initialRequests, emitEvent, source = 'file', apiConfig = null) {
+async function billingWorker(initialRequests, emitEvent, source = 'file', apiConfig = null, stopCheck = () => false) {
     if (!EMAIL || !PASSWORD) {
-        emitEvent('log', { message: '[AUTH] Missing UNITEUS_EMAIL or UNITEUS_PASSWORD in env.', type: 'error' });
+        emitEvent('log', { message: 'Missing UNITEUS_EMAIL or UNITEUS_PASSWORD in env.', type: 'error' });
         return;
     }
 
     emitEvent('log', { message: `Initializing Billing Cycle (Source: ${source})...` });
 
-    // --- Load Requests based on Source ---
-    let requests = initialRequests || [];
-    if (!initialRequests || initialRequests.length === 0) {
-        try {
-            if (source === 'api') {
-                requests = await fetchRequestsFromApi(apiConfig);
-                if (!requests || requests.length === 0) {
-                    emitEvent('log', { message: 'No pending requests found from API.' });
-                    return;
-                }
-            } else {
-                // Default: File loading logic (if not passed in)
-                // If called from server.js with data, this block is skipped. 
-                // But if we want to reload, we can. For now assume server.js passed it if 'file'.
-                if (!requests || requests.length === 0) {
-                    emitEvent('log', { message: 'No requests provided for file mode.' });
-                    return;
-                }
-            }
-        } catch (err) {
-            emitEvent('error', { message: `Failed to load requests: ${err.message}` });
+    // --- Load Requests based on Source (queue = always use passed list, no refetch) ---
+    let requests;
+    if (source === 'queue') {
+        requests = Array.isArray(initialRequests) ? initialRequests : [];
+        if (requests.length === 0) {
+            emitEvent('log', { message: 'No requests in queue. Nothing to process.', type: 'warning' });
             return;
+        }
+    } else {
+        requests = initialRequests || [];
+        if (!initialRequests || initialRequests.length === 0) {
+            try {
+                if (source === 'api' || source === 'tss') {
+                    requests = await fetchRequestsFromTSS(apiConfig);
+                    if (!requests || requests.length === 0) {
+                        emitEvent('log', { message: 'No pending requests found from TSS API.' });
+                        return;
+                    }
+                } else if (source === 'file') {
+                    if (!requests || requests.length === 0) {
+                        emitEvent('log', { message: 'No requests provided for file mode.' });
+                        return;
+                    }
+                }
+            } catch (err) {
+                emitEvent('error', { message: `Failed to load requests: ${err.message}` });
+                return;
+            }
         }
     }
 
     emitEvent('log', { message: `Processing ${requests.length} requests...` });
 
-    // --- Browser Setup ---
-    let page = await getPage();
+    const numLanes = Math.min(BROWSER_COUNT, requests.length);
+    const chunkSize = Math.ceil(requests.length / numLanes);
+    const laneIndices = [];
+    for (let L = 0; L < numLanes; L++) {
+        const start = L * chunkSize;
+        const end = Math.min(start + chunkSize, requests.length);
+        laneIndices.push([]);
+        for (let i = start; i < end; i++) laneIndices[L].push(i);
+    }
+    if (numLanes > 1) {
+        emitEvent('log', { message: `Using ${numLanes} browser(s) in parallel.`, type: 'info' });
+    }
 
-    // Helper to setup console logging on a page
-    const setupPageLogging = (p) => {
-        p.on('console', msg => {
-            const text = msg.text();
-            if (text.startsWith('[Injected]')) {
-                console.log(`[Browser] ${text}`);
-            } else if (msg.type() === 'error') {
-                console.error(`[Browser Error] ${text}`);
+    async function processLane(slot, requests, indices, emitEvent, source, apiConfig, stopCheck) {
+        let page = await getPage(slot);
+        let context = getContext(slot);
+
+        const attachConsoleLogger = (p) => {
+            p.on('console', msg => {
+                const text = msg.text();
+                if (text.startsWith('[Injected]')) {
+                    console.log(`[Browser ${slot}] ${text}`);
+                } else if (msg.type() === 'error') {
+                    console.error(`[Browser ${slot} Error] ${text}`);
+                }
+            });
+        };
+        attachConsoleLogger(page);
+
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        const isLoggedIn = async () => {
+            try {
+                const currentUrl = page.url();
+                return currentUrl.includes('uniteus.io') && !currentUrl.includes('auth');
+            } catch (e) { return false; }
+        };
+
+        const pageReadyId = uniteSelectors.billing.pageReady.id;
+        const waitForPageReady = async () => {
+            try {
+                await page.waitForSelector(`#${pageReadyId}`, { timeout: 15000 });
+            } catch (e) {
+                console.warn(`[Worker slot ${slot}] Warning: Auth table not found, possibly wrong page or slow load.`);
             }
-        });
-    };
-    setupPageLogging(page);
+        };
 
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
+        laneLoop: for (const i of indices) {
+            if (stopCheck && stopCheck()) {
+                emitEvent('log', { message: 'Stop signal received. Stopping process...', type: 'warning' });
+                if (requests[i]) {
+                    requests[i].status = 'stopped';
+                    requests[i].message = 'Process stopped by user';
+                }
+                emitEvent('queue', requests);
+                break laneLoop;
+            }
 
-    const isLoggedIn = async () => {
-        try {
-            const currentUrl = page.url();
-            return currentUrl.includes('uniteus.io') && !currentUrl.includes('auth');
-        } catch (e) { return false; }
-    };
+            const req = requests[i];
 
-    // --- Processing Loop ---
-    for (let i = 0; i < requests.length; i++) {
-        const req = requests[i];
-
-        req.status = 'processing';
-        req.message = 'Starting...';
-        emitEvent('queue', requests);
-        emitEvent('log', { message: `Processing ${req.name} (${i + 1}/${requests.length})` });
-
-        // API Status Tracking
-        let resultSourceStatus = 'unknown';
-
-        if (req.skip) {
-            req.status = 'skipped';
-            emitEvent('log', { message: 'Skipped by config.', type: 'warning' });
+            req.status = 'processing';
+            req.message = 'Starting...';
             emitEvent('queue', requests);
-            continue;
-        }
+            emitEvent('log', { message: `Processing ${req.name} (${i + 1}/${requests.length})` });
 
-        // --- Base Date Calculation (Initial 7-day window) ---
-        try {
-            const [year, month, day] = req.date.split('-').map(Number);
-            const reqStart = new Date(Date.UTC(year, month - 1, day));
-            const reqEnd = new Date(reqStart);
-            reqEnd.setUTCDate(reqEnd.getUTCDate() + 6); // 7 days inclusive
+            let resultSourceStatus = 'unknown';
 
-            const toISO = (d) => d.toISOString().split('T')[0];
+            if (req.skip) {
+                req.status = 'skipped';
+                emitEvent('log', { message: 'Skipped by config.', type: 'warning' });
+                emitEvent('queue', requests);
+                continue;
+            }
 
-            req.start = toISO(reqStart);
-            req.end = toISO(reqEnd);
+            if (!req.date) {
+                req.status = 'failed';
+                req.message = 'Missing date field.';
+                emitEvent('log', { message: 'Missing date field.', type: 'error' });
+                if (source === 'api' && req.orderNumber) {
+                    await updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
+                }
+                const orderIds = getOrderIds(req);
+                if (orderIds.length) {
+                    await updateOrderBillingStatus(orderIds, 'billing_failed', req.message);
+                }
+                emitEvent('queue', requests);
+                continue;
+            }
 
-            emitEvent('log', { message: `Requested range: ${req.start} to ${req.end}` });
-        } catch (e) {
-            req.status = 'failed';
-            emitEvent('log', { message: `[MISC] Invalid date: ${e.message}`, type: 'error' });
-            if (source === 'api') updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
-            continue;
-        }
+            try {
+                const [year, month, day] = req.date.split('-').map(Number);
+                const startDate = new Date(year, month - 1, day);
+                const endDate = new Date(startDate);
+                endDate.setDate(endDate.getDate() + 6);
+                const formatDate = (d) => {
+                    const y = d.getFullYear();
+                    const m = String(d.getMonth() + 1).padStart(2, '0');
+                    const day = String(d.getDate()).padStart(2, '0');
+                    return `${y}-${m}-${day}`;
+                };
+                req.start = formatDate(startDate);
+                req.end = formatDate(endDate);
+                emitEvent('log', { message: `Date range: ${req.start} to ${req.end}` });
+            } catch (e) {
+                req.status = 'failed';
+                req.message = `Invalid date: ${e.message}`;
+                emitEvent('log', { message: `Invalid date: ${e.message}`, type: 'error' });
+                if (source === 'api' && req.orderNumber) {
+                    await updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
+                }
+                const orderIds = getOrderIds(req);
+                if (orderIds.length) {
+                    await updateOrderBillingStatus(orderIds, 'billing_failed', req.message);
+                }
+                emitEvent('queue', requests);
+                continue;
+            }
 
-        // --- Recursive Retry Logic (5 refreshes per session, 2 restarts per client) ---
-        let restartAttempt = 0;
-        const MAX_RESTARTS = 2; // Try up to 2 fresh browser sessions
-        let success = false;
-        let lastRefreshError = null;
+            if (!(await isLoggedIn())) {
+                emitEvent('log', { message: 'Logging in...' });
+                const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
+                if (!loginOk) {
+                    req.status = 'failed';
+                    emitEvent('log', { message: 'Login failed. Aborting.', type: 'error' });
+                    break laneLoop;
+                }
+                await sleep(2000);
+            }
 
-        while (restartAttempt < MAX_RESTARTS && !success) {
-            let refreshAttempt = 0;
-            const MAX_REFRESHES = 5; // Try up to 5 refreshes per session
+            if (!req.url) {
+                req.status = 'failed';
+                req.message = 'Missing URL.';
+                emitEvent('log', { message: 'Missing URL.', type: 'error' });
+                emitEvent('queue', requests);
+                continue;
+            }
 
-            while (refreshAttempt < MAX_REFRESHES && !success) {
-                try {
-                    // --- Login Check ---
-                    if (!(await isLoggedIn())) {
-                        emitEvent('log', { message: 'Logging in...' });
-                        const loginOk = await performLoginSequence(EMAIL, PASSWORD);
+            let result = null;
+            let loginFailedOnRetry = false;
+            let logicError = false;
+
+            try {
+                console.log(`[Worker] Navigating to ${req.url}`);
+                await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await waitForPageReady();
+
+                if (req.proofURL) {
+                    req.proofURL = Array.isArray(req.proofURL) ? req.proofURL : [req.proofURL];
+                }
+
+                restartLoop: for (let r = 0; r < RESTART_CYCLES; r++) {
+                    if (r > 0) {
+                        emitEvent('log', { message: `Restart ${r}/${RESTART_CYCLES}: shutting down browser, clearing cookies/data, starting fresh...`, type: 'warning' });
+                        await closeBrowser(slot);
+                        page = await getPage(slot);
+                        context = getContext(slot);
+                        attachConsoleLogger(page);
+                        emitEvent('log', { message: 'Logging in (after restart). Login flow clears cookies & storage.', type: 'info' });
+                        const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
                         if (!loginOk) {
-                            throw new Error('[AUTH] Login failed');
+                            loginFailedOnRetry = true;
+                            req.status = 'failed';
+                            req.message = 'Login failed after browser restart.';
+                            resultSourceStatus = 'billing_failed';
+                            break restartLoop;
                         }
                         await sleep(2000);
+                        console.log(`[Worker] Navigating to ${req.url}`);
+                        await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                        await waitForPageReady();
                     }
 
-                    // --- Navigation and Refinement ---
-                    if (!req.url) {
-                        req.status = 'failed';
-                        emitEvent('log', { message: '[NAV] Missing URL', type: 'error' });
-                        if (source === 'api') updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
-                        success = true; // Break loop
-                        break;
-                    }
-
-                    const attemptLabel = `(S${restartAttempt + 1}/R${refreshAttempt + 1})`;
-                    emitEvent('log', { message: `Navigating to ${req.url} ${attemptLabel}...` });
-                    await page.goto(req.url, { waitUntil: 'networkidle', timeout: 60000 });
-                    await sleep(3000);
-
-                    // Scrape Auth Info for Clamping
-                    const authInfo = await fetchAuthDetailsFromPage(page);
-
-                    // Clamping Logic
-                    const parseMDY = (s) => {
-                        const match = String(s || "").match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-                        if (!match) return null;
-                        return new Date(Date.UTC(+match[3], +match[1] - 1, +match[2]));
-                    };
-
-                    const dateOpened = parseMDY(authInfo.dateOpened);
-                    const authDatesMatch = authInfo.authorizedDates.match(/(\d{1,2})\/\d{1,2}\/\d{4}\s*-\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-                    const authEnd = authDatesMatch ? new Date(Date.UTC(+authDatesMatch[4], +authDatesMatch[2] - 1, +authDatesMatch[3])) : null;
-
-                    if (dateOpened || authEnd) {
-                        const currentStart = new Date(req.start + 'T00:00:00Z');
-                        const currentEnd = new Date(req.end + 'T00:00:00Z');
-                        let finalStart = currentStart;
-                        let finalEnd = currentEnd;
-
-                        if (dateOpened && currentStart < dateOpened) {
-                            emitEvent('log', { message: `[Clamping] Start date ${req.start} is before Date Opened ${authInfo.dateOpened}. Adjusting...` });
-                            finalStart = dateOpened;
-                        }
-                        if (authEnd && currentEnd > authEnd) {
-                            emitEvent('log', { message: `[Clamping] End date ${req.end} is after Auth End ${authInfo.authorizedDates.split('-')[1]}. Adjusting...` });
-                            finalEnd = authEnd;
+                    refreshLoop: for (let f = 0; f < REFRESH_CYCLES; f++) {
+                        if (f > 0) {
+                            emitEvent('log', { message: `Refresh ${f}/${REFRESH_CYCLES}: refreshing page...`, type: 'warning' });
+                            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+                            await waitForPageReady();
                         }
 
-                        if (finalEnd < finalStart) {
-                            const toISO = (d) => d.toISOString().split('T')[0];
-                            const reqRange = `${req.start} to ${req.end}`;
-                            const authRange = `${authInfo.dateOpened || 'N/A'} to ${authInfo.authorizedDates.split('-')[1] || 'N/A'}`;
-                            const error = new Error(`[LIMITS] No overlap: Requested (${reqRange}) is outside authorized window (${authRange.trim()})`);
-                            error.code = 'NO_OVERLAP';
-                            throw error;
+                        for (let a = 0; a < ATTEMPTS_PER_CYCLE; a++) {
+                            if (a > 0) {
+                                await sleep(SLEEP_ON_ERROR_MS);
+                            }
+                            result = await executeBillingOnPage(page, req);
+                            if (result.ok || result.duplicate) break restartLoop;
+                            if (!isRetryableError(result.error)) {
+                                logicError = true;
+                                emitEvent('log', { message: `Logic error (non-retryable): ${result.error}. Failing immediately.`, type: 'error' });
+                                break restartLoop;
+                            }
+                            emitEvent('log', { message: `Attempt ${a + 1}/${ATTEMPTS_PER_CYCLE} failed: ${result.error}. Waiting ${SLEEP_ON_ERROR_MS / 1000}s...`, type: 'warning' });
                         }
 
-                        const toISO = (d) => d.toISOString().split('T')[0];
-                        req.start = toISO(finalStart);
-                        req.end = toISO(finalEnd);
-
-                        const diffDays = Math.floor((finalEnd - finalStart) / (1000 * 60 * 60 * 24)) + 1;
-                        emitEvent('log', { message: `Final adjusted range: ${req.start} to ${req.end} (${diffDays} days)` });
-
-                        // Amount Refinement (48/day)
-                        if (!req.amount || req.amount === 0) {
-                            req.amount = diffDays * 48;
-                            emitEvent('log', { message: `Calculated amount: $${req.amount} (48 * ${diffDays})` });
+                        if (f < REFRESH_CYCLES - 1) {
+                            emitEvent('log', { message: `All ${ATTEMPTS_PER_CYCLE} attempts failed. Will refresh.`, type: 'warning' });
                         }
                     }
 
-                    // --- Proof URL Fallback ---
-                    if (!req.proofURL) {
-                        const clientDetails = await fetchClientDetailsFromPage(page);
-                        req.proofURL = await generateProofUrl(clientDetails, req, apiConfig);
-
-                        const cleanName = (clientDetails.name || req.name || "Attestation")
-                            .replace(/\s+/g, " ").trim()
-                            .replace(/[\\/:*?"<>|]/g, "");
-                        const toDashMDY = (iso) => {
-                            const [y, m, d] = iso.split('-');
-                            return `${m}-${d}-${y}`;
-                        };
-                        req.fileName = `${cleanName} ${toDashMDY(req.start)} - ${toDashMDY(req.end)}.pdf`;
-                        emitEvent('log', { message: `Generated proof URL: ${req.fileName}` });
+                    if (r < RESTART_CYCLES - 1) {
+                        emitEvent('log', { message: `All ${REFRESH_CYCLES} refresh cycles failed. Will restart browser.`, type: 'warning' });
                     }
+                }
 
-                    const result = await executeBillingOnPage(page, req);
-
-                    // --- Handle Result ---
+                if (loginFailedOnRetry) {
+                    emitEvent('log', { message: 'Login failed after restart. Aborting.', type: 'error' });
+                } else if (result) {
                     if (result.ok) {
                         if (result.verified) {
                             req.status = 'success';
@@ -473,80 +491,182 @@ async function billingWorker(initialRequests, emitEvent, source = 'file', apiCon
                             req.status = 'warning';
                             req.message = 'Submitted but verification failed';
                             emitEvent('log', { message: `⚠️ Submitted, unverified.`, type: 'warning' });
-                            resultSourceStatus = 'billing_successful';
+                            resultSourceStatus = 'billing_unconfirmed';
                         }
                     } else {
                         if (result.duplicate) {
-                            req.status = 'skipped';
-                            req.message = 'Duplicate';
-                            emitEvent('log', { message: `⏭️ Duplicate found.`, type: 'info' });
-                            resultSourceStatus = 'billing_already_exists';
-                            success = true; // Definitive result
+                            req.status = 'success';
+                            req.message = 'Duplicate - already exists';
+                            emitEvent('log', { message: `✅ Duplicate found - marking as successful.`, type: 'success' });
+                            resultSourceStatus = 'billing_successful';
                         } else {
-                            // UI Error (e.g. [SHELF], [UPLOAD], etc.)
-                            // Throwing here triggers the catch block below for refresh/restart retries
-                            throw new Error(result.error || 'Unknown UI Error');
+                            req.status = 'failed';
+                            req.message = result.error;
+                            emitEvent('log', { message: logicError ? `❌ Failed (logic error): ${result.error}` : `❌ Failed (all retries exhausted): ${result.error}`, type: 'error' });
+                            resultSourceStatus = 'billing_failed';
                         }
                     }
+                }
+            } catch (e) {
+                req.status = 'failed';
+                req.message = e.message;
+                emitEvent('log', { message: `Exception: ${e.message}`, type: 'error' });
+                resultSourceStatus = 'billing_failed';
 
-                    success = true; // Exit loops on definitive result
+                const errorMsg = String(e.message || '').toLowerCase();
+                const isBrowserClosed =
+                    (errorMsg.includes('target page') && errorMsg.includes('has been closed')) ||
+                    (errorMsg.includes('target page') && errorMsg.includes('context or browser has been closed')) ||
+                    (errorMsg.includes('page.goto') && errorMsg.includes('has been closed')) ||
+                    (errorMsg.includes('browser has been closed')) ||
+                    (errorMsg.includes('context has been closed'));
 
-                } catch (e) {
-                    const shouldSkip = e.code === 'NO_ATTESTATION_FILE' ||
-                        e.code === 'NO_SIGNATURE' ||
-                        e.code === 'VALIDATION_ERROR' ||
-                        e.code === 'NO_OVERLAP' ||
-                        (e.message && (e.message.includes('[LIMITS]') || e.message.includes('[CONFIG]')));
+                if (isBrowserClosed) {
+                    emitEvent('log', { message: 'CRITICAL: Browser/page has been closed. Reopening new browser instance...', type: 'warning' });
+                    emitEvent('log', { message: `Error details: ${e.message}`, type: 'error' });
 
-                    if (shouldSkip) {
+                    try {
+                        await closeBrowser(slot);
+                        page = await restartBrowser(slot);
+                        context = getContext(slot);
+                        attachConsoleLogger(page);
+
+                        emitEvent('log', { message: 'Browser restarted successfully. Re-logging in...', type: 'info' });
+
+                        const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
+                        if (!loginOk) {
+                            req.status = 'failed';
+                            req.message = 'Login failed after browser restart.';
+                            emitEvent('log', { message: 'Login failed after browser restart. Aborting.', type: 'error' });
+                            emitEvent('queue', requests);
+                            break laneLoop;
+                        }
+
+                        await sleep(2000);
+                        emitEvent('log', { message: 'Browser restarted and logged in. Retrying current request...', type: 'info' });
+
+                        req.status = 'processing';
+                        req.message = 'Retrying after browser restart...';
+                        emitEvent('queue', requests);
+
+                        console.log(`[Worker] Navigating to ${req.url} (after browser restart)`);
+                        await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                        await waitForPageReady();
+
+                        let retryResult = null;
+                        for (let retryAttempt = 0; retryAttempt < ATTEMPTS_PER_CYCLE; retryAttempt++) {
+                            if (retryAttempt > 0) {
+                                await sleep(SLEEP_ON_ERROR_MS);
+                            }
+                            retryResult = await executeBillingOnPage(page, req);
+                            if (retryResult.ok || retryResult.duplicate) break;
+                            if (!isRetryableError(retryResult.error)) {
+                                break;
+                            }
+                            emitEvent('log', { message: `Retry attempt ${retryAttempt + 1}/${ATTEMPTS_PER_CYCLE} failed: ${retryResult.error}`, type: 'warning' });
+                        }
+
+                        if (retryResult) {
+                            result = retryResult;
+                            if (retryResult.ok) {
+                                if (retryResult.verified) {
+                                    req.status = 'success';
+                                    req.message = `Billed: $${retryResult.amount || req.amount}`;
+                                    emitEvent('log', { message: `✅ Success after browser restart!`, type: 'success' });
+                                    resultSourceStatus = 'billing_successful';
+                                } else {
+                                    req.status = 'warning';
+                                    req.message = 'Submitted but verification failed';
+                                    emitEvent('log', { message: `⚠️ Submitted after browser restart, unverified.`, type: 'warning' });
+                                    resultSourceStatus = 'billing_unconfirmed';
+                                }
+                            } else {
+                                if (retryResult.duplicate) {
+                                    req.status = 'success';
+                                    req.message = 'Duplicate - already exists';
+                                    emitEvent('log', { message: `✅ Duplicate found after browser restart - marking as successful.`, type: 'success' });
+                                    resultSourceStatus = 'billing_successful';
+                                } else {
+                                    req.status = 'failed';
+                                    req.message = retryResult.error;
+                                    emitEvent('log', { message: `❌ Failed after browser restart: ${retryResult.error}`, type: 'error' });
+                                    resultSourceStatus = 'billing_failed';
+                                }
+                            }
+                        }
+                    } catch (restartError) {
+                        emitEvent('log', { message: `Failed to restart browser: ${restartError.message}`, type: 'error' });
                         req.status = 'failed';
-                        req.message = e.message;
-                        emitEvent('log', { message: `❌ Skip Client: ${e.message}`, type: 'error' });
+                        req.message = `Browser restart failed: ${restartError.message}`;
                         resultSourceStatus = 'billing_failed';
-                        success = true; // Break both loops
-                        break;
+                        emitEvent('queue', requests);
                     }
-
-                    refreshAttempt++;
-                    if (refreshAttempt >= MAX_REFRESHES) {
-                        emitEvent('log', { message: `Refresh limit reached (${MAX_REFRESHES}).`, type: 'warning' });
-                        break; // Fall through to restart logic
-                    }
-                    lastRefreshError = e.message;
-                    const { step, type, details } = parseBillingError(e.message);
-                    emitEvent('log', { message: `Refresh attempt ${refreshAttempt} failed | Step: ${step} | Type: ${type} | ${details}`, type: 'warning' });
-                    await page.reload({ waitUntil: 'networkidle' }).catch(() => { });
-                    await sleep(2000);
-                }
-            }
-
-            if (!success) {
-                restartAttempt++;
-                const { step, type } = parseBillingError(lastRefreshError || '');
-                if (restartAttempt < MAX_RESTARTS) {
-                    emitEvent('log', { message: `Session failed (last failure: Step: ${step}, Type: ${type}). Restarting browser (Attempt ${restartAttempt + 1}/${MAX_RESTARTS})...`, type: 'warning' });
-                    page = await restartBrowser();
-                    setupPageLogging(page);
                 } else {
-                    req.status = 'failed';
-                    req.message = '[TIMEOUT] All retry attempts failed';
-                    emitEvent('log', { message: `❌ [TIMEOUT] Final attempt failed after ${MAX_RESTARTS} browser sessions.`, type: 'error' });
-                    resultSourceStatus = 'billing_failed';
-                    await page.screenshot({ path: `error_${i}_final.png` });
+                    await page.screenshot({ path: `error_${slot}_${i}.png` }).catch(() => {});
                 }
             }
-        }
 
-        // --- API Update ---
-        if (source === 'api' && req.orderNumber) {
-            await updateOrderStatus(req.orderNumber, resultSourceStatus, apiConfig);
-        }
+            const shouldReportFailure = resultSourceStatus !== 'billing_failed' || isPermanentFailure(req.message);
 
-        emitEvent('queue', requests);
-        await sleep(1000);
+            if (!shouldReportFailure) {
+                emitEvent('log', { message: `Failure not reported to API (transient/retryable). Order left unchanged for retry.`, type: 'info' });
+            }
+
+            if (shouldReportFailure && source === 'api' && req.orderNumber) {
+                const extResult = await updateOrderStatus(req.orderNumber, resultSourceStatus, apiConfig);
+                if (extResult.ok) {
+                    emitEvent('log', { message: 'Extension API: status updated.', type: 'info' });
+                } else {
+                    emitEvent('log', { message: `Extension API: failed to update status — ${extResult.error}`, type: 'error' });
+                }
+            }
+
+            const orderIds = getOrderIds(req);
+            if (shouldReportFailure && orderIds.length > 0) {
+                let tssNotes = '';
+                if (resultSourceStatus === 'billing_successful') {
+                    if (result?.duplicate || req.message?.includes('Duplicate')) {
+                        tssNotes = `Duplicate invoice detected - already exists in system. Amount: $${result?.amount || req.amount || 'N/A'}`;
+                    } else {
+                        tssNotes = `Payment processed successfully. Amount: $${result?.amount || req.amount || 'N/A'}`;
+                    }
+                } else if (resultSourceStatus === 'billing_failed') {
+                    tssNotes = req.message || 'Billing failed';
+                } else if (resultSourceStatus === 'billing_unconfirmed') {
+                    tssNotes = req.message || 'Billing submitted but unverified';
+                } else {
+                    tssNotes = req.message || '';
+                }
+
+                emitEvent('log', { message: `Calling TSS API to update status: ${resultSourceStatus} for ${orderIds.length} order(s)`, type: 'info' });
+                const tssResult = await updateOrderBillingStatus(orderIds, resultSourceStatus, tssNotes);
+                if (tssResult.ok) {
+                    emitEvent('log', { message: `TSS API: billing status updated successfully for ${orderIds.length} order(s).`, type: 'success' });
+                } else {
+                    emitEvent('log', { message: `TSS API: failed to update billing status — ${tssResult.error}`, type: 'error' });
+                }
+            } else if (orderIds.length === 0) {
+                emitEvent('log', { message: 'No orderIds found in request, skipping TSS API update.', type: 'warning' });
+            }
+
+            emitEvent('queue', requests);
+
+            if (loginFailedOnRetry) {
+                break laneLoop;
+            }
+
+            if (stopCheck && stopCheck()) {
+                emitEvent('log', { message: 'Stop signal received. Stopping process after current client...', type: 'warning' });
+                break laneLoop;
+            }
+
+            await sleep(1000);
+        }
     }
+
+    await Promise.all(laneIndices.map((indices, slot) => processLane(slot, requests, indices, emitEvent, source, apiConfig, stopCheck)));
 
     emitEvent('log', { message: 'Billing Cycle Completed.' });
 }
 
-module.exports = { billingWorker, fetchRequestsFromApi };
+module.exports = { billingWorker, fetchRequestsFromApi, fetchRequestsFromTSS };

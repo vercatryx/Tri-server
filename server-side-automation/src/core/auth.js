@@ -1,26 +1,32 @@
 const { getPage, getContext } = require('./browser');
-const uniteSelectors = require('../uniteSelectors');
+const uniteSelectors = require('./uniteSelectors');
 
-const LOGIN_URL = uniteSelectors.urls.login;
+const { urls, auth } = uniteSelectors;
 
-async function performLoginSequence(email, password) {
-    const page = await getPage();
-    const context = getContext();
+/**
+ * @param {string} email
+ * @param {string} password
+ * @param {import('playwright').Page} [pageOptional] - If provided, use this page (and contextOptional) for this slot
+ * @param {import('playwright').BrowserContext} [contextOptional] - Required when pageOptional is provided
+ */
+async function performLoginSequence(email, password, pageOptional, contextOptional) {
+    const page = pageOptional || await getPage(0);
+    const context = contextOptional != null ? contextOptional : getContext(0);
 
     console.log('[Auth] Starting robust login sequence (User-defined flow)...');
 
     // 1. SAFE CLEANUP
     console.log('[Auth] Cleaning up session...');
     try {
-        await page.goto(uniteSelectors.urls.logout, { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => { });
+        await page.goto(urls.logout, { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => { });
         await context.clearCookies();
         await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) { } }).catch(() => { });
     } catch (e) { }
 
     // 2. NAVIGATE TO START URL
-    console.log(`[Auth] Navigating to ${LOGIN_URL}...`);
+    console.log(`[Auth] Navigating to ${urls.login}...`);
     try {
-        await page.goto(LOGIN_URL, { waitUntil: 'networkidle' });
+        await page.goto(urls.login, { waitUntil: 'networkidle' });
     } catch (e) {
         console.warn(`[Auth] Navigation warning: ${e.message}`);
     }
@@ -40,12 +46,12 @@ async function performLoginSequence(email, password) {
 
     try {
         // --- STEP A: EMAIL ---
-        const emailInput = await findEl('Email Input', uniteSelectors.auth.email.selectors);
+        const emailInput = await findEl('Email Input', auth.email.selectors);
         await emailInput.fill(email);
         console.log('[Auth] Email filled.');
 
         // --- STEP B: NEXT BUTTON ---
-        const nextBtn = await findEl('Next Button', uniteSelectors.auth.nextButton.selectors);
+        const nextBtn = await findEl('Next Button', auth.nextButton.selectors);
         await nextBtn.click();
         console.log('[Auth] Clicked Next.');
 
@@ -57,7 +63,7 @@ async function performLoginSequence(email, password) {
 
         // --- STEP D: PASSWORD ---
         console.log('[Auth] Looking for Password input...');
-        const pwdInput = await findEl('Password Input', uniteSelectors.auth.password.selectors);
+        const pwdInput = await findEl('Password Input', auth.password.selectors);
         console.log('[Auth] Password input found, filling...');
 
         // Direct fill (no typing): Focus -> Clear -> Fill -> Input/Change events
@@ -83,11 +89,13 @@ async function performLoginSequence(email, password) {
         console.log('[Auth] ========== SIGN IN BUTTON SEARCH START ==========');
         console.log('[Auth] Current URL:', page.url());
         
-        const signSelectors = uniteSelectors.auth.signIn.selectors;
+        const signSelectors = auth.signIn.selectors;
         let signBtn = null;
         let foundSelector = null;
         let elementInfo = null;
+
         console.log(`[Auth] Trying ${signSelectors.length} selectors to find Sign In button...`);
+
         for (let i = 0; i < signSelectors.length; i++) {
             const selector = signSelectors[i];
             console.log(`[Auth] [${i + 1}/${signSelectors.length}] Trying selector: "${selector}"`);

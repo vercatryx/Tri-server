@@ -3,14 +3,15 @@ const fs = require('fs');
 const path = require('path');
 const { launchBrowser, closeBrowser } = require('./core/browser');
 const { performLoginSequence } = require('./core/auth');
-const { billingWorker, fetchRequestsFromApi } = require('./core/billingWorker');
+const { billingWorker, fetchRequestsFromApi, fetchRequestsFromTSS } = require('./core/billingWorker');
 
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3500;
 
-app.use(express.json());
+// Allow large queue payloads when running "Run current queue" with many items (default is 100kb)
+app.use(express.json({ limit: '10mb' }));
 // Serve static frontend
 app.use(express.static(path.join(__dirname, '../public')));
 
@@ -47,18 +48,22 @@ function broadcast(type, data) {
 
 app.get('/events', eventsHandler);
 
+// Billing UI (same as index) – ensure reachable at /billing (e.g. localhost:3000/billing)
+app.get('/billing', (req, res) => {
+    res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
 // State
 let isRunning = false;
 let currentRequests = null;
+let shouldStop = false;
+let stopBillingWorker = null;
 
 // Routes
 app.post('/fetch-requests', async (req, res) => {
-    const { apiBaseUrl, apiKey } = req.body;
-    const apiConfig = (apiBaseUrl) ? { baseUrl: apiBaseUrl, key: apiKey } : null;
-
     try {
-        console.log('[Server] Fetching requests from API (Preview Mode)...');
-        const requests = await fetchRequestsFromApi(apiConfig);
+        console.log('[Server] Fetching requests from TSS API (Preview Mode)...');
+        const requests = await fetchRequestsFromTSS();
 
         if (!requests || requests.length === 0) {
             return res.json({ success: true, count: 0, message: 'No pending requests found.' });
@@ -80,7 +85,7 @@ app.post('/process-billing', async (req, res) => {
         return res.status(409).json({ message: 'Process already running' });
     }
 
-    const { source = 'file', apiBaseUrl, apiKey } = req.body;
+    const { source = 'file', requests: bodyRequests } = req.body;
 
     let requests = [];
 
@@ -106,11 +111,36 @@ app.post('/process-billing', async (req, res) => {
             requests.forEach(r => { r.status = 'pending'; r.message = ''; });
             currentRequests = requests;
             broadcast('queue', currentRequests);
+        } else if (source === 'queue') {
+            // -- SOURCE: QUEUE (client sends selected list – no refetch) --
+            if (!Array.isArray(bodyRequests) || bodyRequests.length === 0) {
+                return res.status(400).json({
+                    error: bodyRequests == null
+                        ? 'Missing "requests" in body for Run current queue.'
+                        : 'No requests in queue. Select items or load from server first.'
+                });
+            }
+            // Use a shallow copy so we have a stable snapshot (objects inside are same refs for status updates)
+            requests = bodyRequests.slice();
+            requests.forEach(r => { r.status = r.status || 'pending'; r.message = r.message || ''; });
+            currentRequests = requests;
+            broadcast('queue', currentRequests);
+            broadcast('log', { message: `Running ${requests.length} request(s) from current queue (no refetch).`, type: 'info' });
+            console.log(`[Server] Run current queue: ${requests.length} request(s) (no TSS refetch).`);
         } else {
-            // -- SOURCE: API --
-            // We set currentRequests to empty or null so UI knows something is happening but waiting for data
-            currentRequests = [];
-            broadcast('log', { message: 'Mode: API. Fetching pending requests...', type: 'info' });
+            // -- SOURCE: TSS API (only for "Start from Server") --
+            console.log('[Server] Fetching requests from TSS API...');
+            requests = await fetchRequestsFromTSS();
+            
+            if (!requests || requests.length === 0) {
+                return res.status(400).json({ error: 'No requests found from TSS API' });
+            }
+
+            // Initialize status for UI
+            requests.forEach(r => { r.status = 'pending'; r.message = ''; });
+            currentRequests = requests;
+            broadcast('queue', currentRequests);
+            broadcast('log', { message: `Fetched ${requests.length} requests from TSS API.`, type: 'info' });
         }
 
     } catch (e) {
@@ -122,24 +152,55 @@ app.post('/process-billing', async (req, res) => {
     res.json({ message: 'Automation started', source: source });
 
     isRunning = true;
+    shouldStop = false;
     broadcast('log', { message: `--- Starting Automation Run (${source}) ---`, type: 'info' });
+    broadcast('status', { isRunning: true });
 
-    // Prepare API config
-    const apiConfig = (source === 'api' && apiBaseUrl) ? { baseUrl: apiBaseUrl, key: apiKey } : null;
+    // For TSS API, we don't need apiConfig since it's a public endpoint
+    const apiConfig = null;
+
+    // Create stop function that can be called to stop the worker
+    stopBillingWorker = () => {
+        shouldStop = true;
+        console.log('[Server] Stop signal received');
+    };
 
     (async () => {
         try {
             await launchBrowser();
-            // Pass apiConfig to worker
-            await billingWorker(source === 'file' ? requests : null, broadcast, source, apiConfig);
-            broadcast('log', { message: '--- Automation Run Complete ---', type: 'success' });
+            // Pass requests to worker (for file mode) or null (for API mode, worker will fetch from TSS)
+            // Also pass a function to check if we should stop
+            await billingWorker((source === 'file' || source === 'queue') ? requests : null, broadcast, source, apiConfig, () => shouldStop);
+            if (shouldStop) {
+                broadcast('log', { message: '--- Automation Run Stopped by User ---', type: 'warning' });
+            } else {
+                broadcast('log', { message: '--- Automation Run Complete ---', type: 'success' });
+            }
         } catch (e) {
             console.error('CRITICAL AUTOMATION ERROR:', e);
             broadcast('log', { message: `Critical Error: ${e.message}`, type: 'error' });
         } finally {
             isRunning = false;
+            shouldStop = false;
+            stopBillingWorker = null;
+            broadcast('status', { isRunning: false });
         }
     })();
+});
+
+app.post('/stop-billing', (req, res) => {
+    if (!isRunning) {
+        return res.json({ message: 'No process is currently running' });
+    }
+
+    console.log('[Server] Stop request received');
+    shouldStop = true;
+    if (stopBillingWorker) {
+        stopBillingWorker();
+    }
+    
+    broadcast('log', { message: 'Stop signal sent. Process will stop after current client...', type: 'warning' });
+    res.json({ message: 'Stop signal sent' });
 });
 
 app.listen(PORT, () => {

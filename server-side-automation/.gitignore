@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Logs and runtime
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Optional: local data / generated (uncomment if you don't want to track)
+# billing_requests.json
+
+# Screenshots / error captures (generated at runtime)
+error_*.png
+login_*.png
+login_flow_error.png
+login_timeout.png
+
+# Build / output (if you add any later)
+dist/
+build/
+coverage/

@@ -13,18 +13,22 @@
         console.log(`[AUTH_RETRY] ${step}:`, details);
     };
 
-    // Use unified selectors when available (injected from uniteSelectors.js)
-    const authTable = (typeof window !== 'undefined' && window.UNITE_SELECTORS && window.UNITE_SELECTORS.billing && window.UNITE_SELECTORS.billing.authorizedTable) || null;
-    const authIds = authTable ? { date: authTable.date.id, amount: authTable.amount.id, dateOpened: authTable.dateOpened.id } : { date: 'basic-table-authorized-service-delivery-date-s-value', amount: 'basic-table-authorized-amount-value', dateOpened: 'basic-table-date-opened-value' };
-    const authXpaths = authTable ? { date: authTable.date.xpath, amount: authTable.amount.xpath, dateOpened: authTable.dateOpened.xpath } : { date: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]/div/table/tbody/tr[3]/td[2]', amount: '//*[@id="basic-table-authorized-amount-value"]', dateOpened: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[1]/div[1]/div/table/tbody/tr[3]/td[2]' };
-
+    // Try to find auth elements
     const findAuthElements = () => {
-        let amountEl = document.querySelector('#' + authIds.amount);
-        let datesEl = document.querySelector('#' + authIds.date);
-        let dateOpenedEl = document.querySelector('#' + authIds.dateOpened);
-        if (!amountEl && authXpaths.amount) amountEl = byXPath(authXpaths.amount);
-        if (!datesEl && authXpaths.date) datesEl = byXPath(authXpaths.date);
-        if (!dateOpenedEl && authXpaths.dateOpened) dateOpenedEl = byXPath(authXpaths.dateOpened);
+        let amountEl = document.querySelector('#basic-table-authorized-amount-value');
+        let datesEl = document.querySelector('#basic-table-authorized-service-delivery-date-s-value');
+        let dateOpenedEl = document.querySelector('#basic-table-date-opened-value');
+
+        if (!amountEl) {
+            amountEl = byXPath('//*[@id="basic-table-authorized-amount-value"]');
+        }
+        if (!datesEl) {
+            datesEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[3]/div/div[1]/div/table/tbody/tr[3]/td[2]');
+        }
+        if (!dateOpenedEl) {
+            dateOpenedEl = byXPath('/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[1]/div[2]/div[1]/div[1]/div/table/tbody/tr[3]/td[2]');
+        }
+
         return { amountEl, datesEl, dateOpenedEl };
     };
 

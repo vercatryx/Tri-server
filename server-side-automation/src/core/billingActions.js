@@ -1,18 +1,18 @@
 // This module contains the complex DOM interactions ported from the extension.
 // It uses page.evaluate() to inject the exact same robust logic into the browser.
-// All element IDs/XPaths/classes come from uniteSelectors.billing (single source of truth).
+// All Unite DOM selectors/IDs come from uniteSelectors.billing – edit that file when the site updates.
 
-const uniteSelectors = require('../uniteSelectors');
+const uniteSelectors = require('./uniteSelectors');
 
 async function executeBillingOnPage(page, requestData) {
     console.log('[BillingActions] Injecting billing logic...');
-    const sel = uniteSelectors.billing;
 
     try {
-        const result = await page.evaluate(async (arg) => {
-            const { data, sel } = arg;
+        const sel = uniteSelectors.billing;
+        const result = await page.evaluate(async ({ data, sel }) => {
             // =========================================================================
             //  INJECTED LOGIC START (Ported from enterBillingDetails.js)
+            //  Uses sel.* for all Unite elements – see uniteSelectors.js
             // =========================================================================
 
             console.log('[Injected] Starting billing logic for:', data);
@@ -60,13 +60,6 @@ async function executeBillingOnPage(page, requestData) {
                 return `${mm}/${dd}/${yy}`;
             };
 
-            // --- Constants from sel (uniteSelectors.billing) ---
-            const ADD_BTN_ID = sel.addButton.id;
-            const ADD_BTN_XP = sel.addButton.xpath;
-            const AMOUNT_ID = sel.amount.id;
-            const AMOUNT_XPATH = sel.amount.xpath;
-            const CANCEL_ID = sel.cancelButton.id;
-
             // --- Inputs ---
             // Data comes in ISO format from JSON usually: YYYY-MM-DD
             const startStr = data.start;
@@ -80,7 +73,7 @@ async function executeBillingOnPage(page, requestData) {
             const amount = data.amount;
 
             if (amount === undefined || amount === null) {
-                console.warn('[Injected] Missing "amount" in JSON request. Assuming it will be calculated/provided by worker.');
+                return { ok: false, error: 'Missing "amount" in JSON request' };
             }
 
             console.log(`[Injected] Transformed dates: ${toMDY(reqStart)} -> ${toMDY(reqEnd)}`);
@@ -97,14 +90,13 @@ async function executeBillingOnPage(page, requestData) {
                     return Number.isFinite(n) ? Math.round(n * 100) : NaN;
                 };
                 const sameDay = (a, b) => a && b && a.getTime() === b.getTime();
-                const cardClass = (sel.duplicateScan.cardClass || 'fee-schedule-provided-service-card').replace(/^\./, '');
-                const cards = Array.from(document.querySelectorAll('.' + cardClass));
+                const ds = sel.duplicateScan;
+                const cards = Array.from(document.querySelectorAll('.' + ds.cardClass));
+                const amtSel = '[data-test-element="' + ds.amountDataTest + '"]';
+                const datesSel = (ds.datesDataTest || []).map(d => '[data-test-element="' + d + '"]').join(', ') || '[data-test-element="service-dates-value"]';
                 const tCents = cents(amount);
-                const amtTest = sel.duplicateScan.amountDataTest || 'unit-amount-value';
-                const datesTest = sel.duplicateScan.datesDataTest || ['service-dates-value', 'service-start-date-value'];
-                const datesSel = Array.isArray(datesTest) ? datesTest.map(d => '[data-test-element="' + d + '"]').join(', ') : '[data-test-element="' + datesTest + '"]';
                 for (const card of cards) {
-                    const amtEl = card.querySelector('[data-test-element="' + amtTest + '"]');
+                    const amtEl = card.querySelector(amtSel);
                     const rngEl = card.querySelector(datesSel);
                     const amtCents = cents(norm(amtEl?.textContent));
                     const txt = norm(rngEl?.textContent);
@@ -125,29 +117,17 @@ async function executeBillingOnPage(page, requestData) {
 
             if (doInlineScanFallback(reqStart, reqEnd, amount)) {
                 console.warn('[Injected] Duplicate detected (early). Aborting.');
-                return { ok: false, duplicate: true, error: '[DUPLICATE] Duplicate invoice detected' };
+                return { ok: false, duplicate: true, error: 'Duplicate invoice detected' };
             }
 
-            let currentStep = 'init';
-            function classifyError(msg) {
-                if (!msg) return 'UNKNOWN';
-                const m = String(msg);
-                if (/null|querySelector|reading\s+'|offsetParent|\.value|\.click/.test(m)) return 'ELEMENT_NOT_FOUND';
-                if (/timeout|Timeout/.test(m)) return 'TIMEOUT';
-                if (/closed|has been closed/.test(m)) return 'BROWSER_CLOSED';
-                if (/Fetch failed|network|ECONNREFUSED/.test(m)) return 'NETWORK';
-                return 'RUNTIME_ERROR';
-            }
-
-            try {
             // --- 0. Wait for Authorized Table (Page Ready Check) ---
-            currentStep = 'wait_authorized_table';
-            const AUTH_DATE_ID = sel.authorizedTable.date.id;
-            const AUTH_AMOUNT_ID = sel.authorizedTable.amount.id;
+            const ad = sel.authorizedTable.date;
+            const aa = sel.authorizedTable.amount;
+
             console.log('[Injected] Waiting for Authorized Table elements...');
             const getAuthEls = () => ({
-                dateEl: document.getElementById(AUTH_DATE_ID) || byXPath(sel.authorizedTable.date.xpath),
-                amountEl: document.getElementById(AUTH_AMOUNT_ID) || byXPath(sel.authorizedTable.amount.xpath)
+                dateEl: document.getElementById(ad.id) || (ad.xpath && byXPath(ad.xpath)) || null,
+                amountEl: document.getElementById(aa.id) || (aa.xpath && byXPath(aa.xpath)) || null
             });
 
             for (let i = 0; i < 30; i++) {
@@ -197,7 +177,7 @@ async function executeBillingOnPage(page, requestData) {
 
                     // Fix overlap
                     if (reqStart > reqEnd) {
-                        return { ok: false, error: `[LIMITS] Clamped dates invalid: ${toMDY(reqStart)} > ${toMDY(reqEnd)}` };
+                        return { ok: false, error: `Clamped dates invalid: ${toMDY(reqStart)} > ${toMDY(reqEnd)}` };
                     }
 
                     // Amount Clamping (Logic Removed - User wants Raw Amount)
@@ -210,13 +190,13 @@ async function executeBillingOnPage(page, requestData) {
 
 
             // --- 1. Find Add Button & Open Shelf ---
-            currentStep = 'open_shelf';
-            const addBtnText = (sel.addButton.textContains || 'add new contracted service').toLowerCase();
+            const ab = sel.addButton;
             const findAddButton = () => {
-                let btn = document.getElementById(ADD_BTN_ID) || byXPath(ADD_BTN_XP);
+                let btn = (ab.id && document.getElementById(ab.id)) || (ab.xpath && byXPath(ab.xpath));
                 if (btn) return btn;
+                const fallback = (ab.textContains || 'add new contracted service').toLowerCase();
                 const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                return buttons.find(b => (b.textContent || '').toLowerCase().includes(addBtnText)) || null;
+                return buttons.find(b => (b.textContent || '').toLowerCase().includes(fallback)) || null;
             };
 
             let addBtn = null;
@@ -226,10 +206,10 @@ async function executeBillingOnPage(page, requestData) {
                 await sleep(500);
             }
 
-            if (!addBtn) return { ok: false, error: '[SHELF] Could not find "Add New Contracted Service" button (Shelf trigger missing)' };
+            if (!addBtn) return { ok: false, error: 'Add button not found (Shelf trigger missing)' };
 
-            // Open Check
-            const isShelfOpen = () => !!(document.getElementById(AMOUNT_ID) || byXPath(AMOUNT_XPATH));
+            const am = sel.amount;
+            const isShelfOpen = () => !!((am.id && document.getElementById(am.id)) || (am.xpath && byXPath(am.xpath)));
 
             if (!isShelfOpen()) {
                 console.log('[Injected] Clicking Add Button...');
@@ -239,7 +219,7 @@ async function executeBillingOnPage(page, requestData) {
                     if (isShelfOpen()) break;
                     await sleep(200);
                 }
-                if (!isShelfOpen()) return { ok: false, error: '[SHELF] Billing shelf failed to open after clicking "Add"' };
+                if (!isShelfOpen()) return { ok: false, error: 'Shelf did not open' };
             }
 
             // --- 2. Calculate & Verify Dates ---
@@ -249,48 +229,34 @@ async function executeBillingOnPage(page, requestData) {
             console.log(`[Step] Amount (Explicit): $${amount}`);
 
             if (days < 1) {
-                return { ok: false, error: `[DATES] Invalid date range: ${days} days` };
+                return { ok: false, error: `Invalid date range: ${days} days` };
             }
 
             // --- 3. Fill Billing Info ---
-            currentStep = 'fill_amount';
-            // Fill Amount
-            const amountField = document.getElementById(AMOUNT_ID) || byXPath(AMOUNT_XPATH);
-            if (!amountField) return { ok: false, error: '[SHELF] Failed to find "Unit Amount" input field on billing shelf' };
+            const amountField = (am.id && document.getElementById(am.id)) || (am.xpath && byXPath(am.xpath));
+            if (!amountField) return { ok: false, error: 'Amount field missing' };
 
-            console.log(`[Step] Entering Amount: ${amount}...`);
-            if (amount === undefined || amount === null) {
-                return { ok: false, error: '[DATES] Calculated amount is null/undefined before entry' };
-            }
+            // Use the exact amount from JSON - no calculation, no multiplication, no modification
+            // Convert to number to ensure proper formatting, then back to string for the input
+            const exactAmount = typeof amount === 'number' ? amount : Number(amount);
+            // Format as string without any currency symbols or extra formatting
+            const amountValue = exactAmount.toString();
+            
+            console.log(`[Step] Entering Exact Amount: ${amountValue} (original from JSON: ${amount})...`);
+            
             amountField.focus();
-            setNativeValue(amountField, String(amount));
-            fire(amountField, 'input');
-            fire(amountField, 'change');
+            // Clear field first to remove any existing value
+            setNativeValue(amountField, '');
+            await sleep(50);
+            // Set the exact amount value
+            setNativeValue(amountField, amountValue);
+            // Trigger events to ensure React/framework recognizes the change
+            fire(amountField, 'input', { bubbles: true, cancelable: true });
+            fire(amountField, 'change', { bubbles: true, cancelable: true });
             amountField.blur();
             await sleep(500);
 
-            // --- 4. Period of Service: select "Date Range" so range picker is visible ---
-            currentStep = 'set_date_range';
-            const period = sel.periodOfService || {};
-            const dateRangeRadioId = period.dateRangeRadioId || 'provided-service-period-of-service-1';
-            const dateRangeRadio = document.getElementById(dateRangeRadioId) ||
-                document.querySelector(`input[name="provided_service.period_of_service"][value="Date Range"]`) ||
-                (() => {
-                    const label = document.getElementById(period.dateRangeLabelId || 'Date Range-label') ||
-                        Array.from(document.querySelectorAll('label')).find(l => (l.textContent || '').trim() === 'Date Range');
-                    return label ? document.getElementById(label.getAttribute('for')) : null;
-                })();
-            if (dateRangeRadio && !dateRangeRadio.checked) {
-                console.log('[DateLogic] Selecting "Date Range" radio...');
-                clickLikeHuman(dateRangeRadio);
-                await sleep(400);
-                const labelForRadio = document.querySelector(`label[for="${dateRangeRadioId}"]`);
-                if (labelForRadio && !dateRangeRadio.checked) clickLikeHuman(labelForRadio);
-                await sleep(300);
-            } else if (!dateRangeRadio) {
-                console.warn('[DateLogic] Period of Service "Date Range" radio not found; continuing (form may not have Single vs Range).');
-            }
-
+            // --- 4. Date Picker Logic (The Beast) ---
             console.log('[Step] Setting Date Range in UI...');
 
             // ===== Robust Date Picker Logic (Ported from Extension) =====
@@ -301,77 +267,28 @@ async function executeBillingOnPage(page, requestData) {
                 const M = (el, t) => el && el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
                 const P = (el, t) => el && el.dispatchEvent(new PointerEvent(t, { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
                 const clickLikeHuman = (el) => { P(el, 'pointerdown'); M(el, 'mousedown'); P(el, 'pointerup'); M(el, 'mouseup'); M(el, 'click'); };
-                const getCoords = (el) => {
-                    const r = el.getBoundingClientRect();
-                    const x = r.left + r.width / 2, y = r.top + r.height / 2;
-                    return { clientX: x, clientY: y, pageX: x + window.pageXOffset, pageY: y + window.pageYOffset };
-                };
-                const clickHumanAsync = async (el, delayMs = 20) => {
-                    if (!el) return;
-                    el.scrollIntoView?.({ block: 'center', inline: 'center' });
-                    await sleep(50);
-                    const c = getCoords(el);
-                    el.focus?.();
-                    await sleep(30);
-                    const m = (t, o) => el.dispatchEvent(new MouseEvent(t, { view: window, bubbles: true, cancelable: true, ...c, ...o }));
-                    const p = (t, o) => el.dispatchEvent(new PointerEvent(t, { pointerId: 1, pointerType: 'mouse', isPrimary: true, pressure: t === 'pointerdown' ? 1 : 0, width: 1, height: 1, ...c, bubbles: true, cancelable: true, ...o }));
-                    m('mousemove', {}); p('pointermove', {});
-                    await sleep(delayMs);
-                    p('pointerdown', { buttons: 1 });
-                    await sleep(delayMs);
-                    m('mousedown', { buttons: 1, detail: 1 });
-                    await sleep(delayMs);
-                    p('pointerup', { buttons: 0 });
-                    await sleep(delayMs);
-                    m('mouseup', { buttons: 0, detail: 1 });
-                    await sleep(delayMs);
-                    m('click', { detail: 1 });
-                };
 
                 const dr = sel.dateRange;
-                const RANGE_BTN_ID = dr.buttonId;
-                const START_YR_ID = dr.startYearId;
-                const END_YR_ID = dr.endYearId;
-                const DATE_RANGE_LABEL_ID = dr.labelId;
-                const isOpen = () => {
-                    const openEl = dr.dropdownOpenClass && document.querySelector('.' + dr.dropdownOpenClass.replace(/\s+/g, '.'));
-                    if (openEl) return true;
-                    const dd = document.querySelector(dr.dropdownClass);
-                    if (dd && (dd.offsetParent !== null || (dd.getBoundingClientRect?.().height || 0) > 0)) return true;
-                    const durationDdEl = dr.durationDropdown && document.querySelector(dr.durationDropdown);
-                    if (durationDdEl && (durationDdEl.offsetParent !== null || (durationDdEl.getBoundingClientRect?.().height || 0) > 0)) return true;
-                    return false;
-                };
+                const fi = dr.fakeInput || {};
 
-                // 1. OPEN PICKER (Robust Logic Exact Match)
+                const isOpen = () => !!document.querySelector('.' + (dr.dropdownOpenClass || 'ui-duration-field__dropdown ui-duration-field__dropdown--open').replace(/\s+/g, '.'));
+
                 const getFakeCandidates = () => {
-                    const fi = dr.fakeInput;
-                    const byTrigger = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
-                    const a = document.getElementById(RANGE_BTN_ID);
-                    const b = document.querySelector(fi.roleButton);
-                    const c = document.querySelector(fi.value);
-                    const d = document.querySelector(fi.container);
-                    return [byTrigger, a, b, c, d].filter(Boolean);
+                    const a = dr.buttonId && document.getElementById(dr.buttonId);
+                    const b = fi.roleButton && document.querySelector(fi.roleButton);
+                    const c = fi.value && document.querySelector(fi.value);
+                    const d = fi.container && document.querySelector(fi.container);
+                    return [a, b, c, d].filter(Boolean);
                 };
 
                 const openPicker = async () => {
                     if (isOpen()) return true;
 
-                    const labelID = dr.labelId;
-                    const labelXP = dr.labelXpath;
-                    const label = document.getElementById(labelID) || byXPath(labelXP);
-                    const triggerBtn = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
+                    const label = (dr.labelId && document.getElementById(dr.labelId)) || (dr.labelXpath && byXPath(dr.labelXpath));
 
                     const tryOnce = async () => {
                         const cands = getFakeCandidates();
                         console.log('[DateLogic] Attempting to open picker...');
-
-                        // 0) Calendar open button (trigger XPath) – when Date Range is selected this is the button
-                        if (triggerBtn && shown(triggerBtn)) {
-                            console.log('[DateLogic] Clicking calendar trigger (triggerXpath)...');
-                            await clickHumanAsync(triggerBtn, 25);
-                            for (let i = 0; i < 15; i++) { if (isOpen()) return true; await sleep(80); }
-                        }
 
                         // 1) Label tap (some builds need it to reveal inputs)
                         if (label && shown(label)) {
@@ -415,262 +332,26 @@ async function executeBillingOnPage(page, requestData) {
                 };
 
                 if (!await openPicker()) {
-                    return { ok: false, error: '[DATES] Could not open Date Range picker after multiple attempts' };
+                    console.error('[DateLogic] Failed to open date picker after robust attempts.');
+                    return false;
                 }
                 console.log('[DateLogic] Picker is open.');
-                await sleep(400);
+                await sleep(500);
 
-                // --- Two-calendar flow: try duration-field first, then date-field (DOM may use ui-date-field) ---
-                const durationDd = dr.durationDropdown && document.querySelector(dr.durationDropdown);
-                let calendarFlowDone = false;
-                if (durationDd) {
-                    const leftCal = dr.durationCalLeft && durationDd.querySelector(dr.durationCalLeft);
-                    const rightCal = dr.durationCalRight && durationDd.querySelector(dr.durationCalRight);
-                    if (leftCal && rightCal) {
-                        console.log('[DateLogic] Using duration-field calendar path (two panes).');
-                        const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-                        const monthNameToIdx = (name) => MONTH_NAMES.indexOf(String(name || '').trim().toLowerCase());
-                        const getVis = (ddEl) => {
-                            const spans = ddEl.querySelectorAll('.ui-duration-field__controls div span');
-                            const sy = ddEl.querySelector('#' + (dr.durationStartYearId || 'provided-service-dates-start-year'));
-                            const ey = ddEl.querySelector('#' + (dr.durationEndYearId || 'provided-service-dates-end-year'));
-                            const lM = spans[0] ? monthNameToIdx(spans[0].textContent) : -1;
-                            const rM = spans[1] ? monthNameToIdx(spans[1].textContent) : -1;
-                            const lY = parseInt(sy?.value || '0', 10);
-                            const rY = parseInt(ey?.value || '0', 10);
-                            return [{ monthIdx: lM, year: lY }, { monthIdx: rM, year: rY }];
-                        };
-                        const ensureMonth = async (targetMonthIdx, targetYear) => {
-                            const prev = durationDd.querySelector(dr.durationPrev);
-                            const next = durationDd.querySelector(dr.durationNext);
-                            if (!prev || !next) return false;
-                            const targetAbs = targetYear * 12 + targetMonthIdx;
-                            for (let i = 0; i < 36; i++) {
-                                const vis = getVis(durationDd);
-                                if (!vis) return false;
-                                const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
-                                const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
-                                if (targetAbs >= leftAbs && targetAbs <= rightAbs) return true;
-                                if (targetAbs < leftAbs) await clickHumanAsync(prev, 25);
-                                else await clickHumanAsync(next, 25);
-                                await sleep(300);
-                            }
-                            return false;
-                        };
-                        const clickDayInPane = async (pane, dayNum) => {
-                            const want = String(dayNum);
-                            const cells = pane.querySelectorAll(dr.durationDayButton || '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]');
-                            const btn = Array.from(cells).find(b => (b.textContent || '').trim() === want);
-                            if (!btn) return false;
-                            await clickHumanAsync(btn, 25);
-                            await sleep(200);
-                            return true;
-                        };
-                        const pickPane = (vis, targetAbs) => {
-                            const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
-                            const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
-                            return targetAbs === leftAbs ? leftCal : targetAbs === rightAbs ? rightCal : leftCal;
-                        };
-                        if (await ensureMonth(bStart.getMonth(), bStart.getFullYear())) {
-                            const vis = getVis(durationDd);
-                            const pane = pickPane(vis, bStart.getFullYear() * 12 + bStart.getMonth());
-                            const startOk = await clickDayInPane(pane, bStart.getDate());
-                            if (startOk && await ensureMonth(bEnd.getMonth(), bEnd.getFullYear())) {
-                                const vis2 = getVis(durationDd);
-                                const pane2 = pickPane(vis2, bEnd.getFullYear() * 12 + bEnd.getMonth());
-                                const endOk = await clickDayInPane(pane2, bEnd.getDate());
-                                if (endOk) {
-                                    for (let i = 0; i < 25; i++) {
-                                        const stillOpen = durationDd.offsetParent !== null || (durationDd.getBoundingClientRect?.().height || 0) > 0;
-                                        if (!stillOpen) break;
-                                        await sleep(80);
-                                    }
-                                    const triggerBtn = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
-                                    if (triggerBtn && shown(triggerBtn)) { await clickHumanAsync(triggerBtn, 25); await sleep(200); }
-                                    await sleep(300);
-                                    console.log('[DateLogic] Calendar-click flow done (duration-field).');
-                                    calendarFlowDone = true;
-                                    return true;
-                                }
-                            }
-                        }
-                    } else {
-                        console.log('[DateLogic] Duration dropdown found but two calendars not found; trying date-field path.');
-                    }
-                } else {
-                    console.log('[DateLogic] Duration dropdown not found (selector: ' + (dr.durationDropdown || '') + '); trying date-field two-calendar path.');
-                }
-
-                // Date-field two-calendar path (when DOM uses ui-date-field instead of ui-duration-field)
-                if (!calendarFlowDone && dr.dropdownClass) {
-                    const dateFieldDd = document.querySelector(dr.dropdownClass);
-                    if (dateFieldDd) {
-                        const calSelector = dr.dateFieldCalendars || '.ui-calendar';
-                        const calendars = dateFieldDd.querySelectorAll(calSelector);
-                        const leftCalDf = calendars.length >= 2 ? calendars[0] : null;
-                        const rightCalDf = calendars.length >= 2 ? calendars[1] : null;
-                        if (leftCalDf && rightCalDf) {
-                            console.log('[DateLogic] Using date-field two-calendar path.');
-                            const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-                            const monthNameToIdx = (name) => MONTH_NAMES.indexOf(String(name || '').trim().toLowerCase());
-                            const controlsSel = dr.dateFieldControls || '.ui-date-field__controls';
-                            const spansSel = controlsSel + ' div span';
-                            const yearStartId = dr.durationStartYearId || 'provided-service-dates-start-year';
-                            const yearEndId = dr.durationEndYearId || 'provided-service-dates-end-year';
-                            const getVisDf = (ddEl) => {
-                                const spans = ddEl.querySelectorAll(spansSel);
-                                const sy = document.getElementById(yearStartId) || ddEl.querySelector('#' + yearStartId);
-                                const ey = document.getElementById(yearEndId) || ddEl.querySelector('#' + yearEndId);
-                                const lM = spans[0] ? monthNameToIdx(spans[0].textContent) : -1;
-                                const rM = spans[1] ? monthNameToIdx(spans[1].textContent) : -1;
-                                const lY = parseInt(sy?.value || '0', 10);
-                                const rY = parseInt(ey?.value || '0', 10);
-                                return [{ monthIdx: lM, year: lY }, { monthIdx: rM, year: rY }];
-                            };
-                            const prevDf = dateFieldDd.querySelector(dr.navPrev);
-                            const nextDf = dateFieldDd.querySelector(dr.navNext);
-                            const ensureMonthDf = async (targetMonthIdx, targetYear) => {
-                                if (!prevDf || !nextDf) return false;
-                                const targetAbs = targetYear * 12 + targetMonthIdx;
-                                for (let i = 0; i < 36; i++) {
-                                    const vis = getVisDf(dateFieldDd);
-                                    if (!vis || vis[0].monthIdx < 0) return false;
-                                    const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
-                                    const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
-                                    if (targetAbs >= leftAbs && targetAbs <= rightAbs) return true;
-                                    if (targetAbs < leftAbs) await clickHumanAsync(prevDf, 25);
-                                    else await clickHumanAsync(nextDf, 25);
-                                    await sleep(300);
-                                }
-                                return false;
-                            };
-                            const dayBtnSel = dr.durationDayButton || '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]';
-                            const clickDayInPaneDf = async (pane, dayNum) => {
-                                const want = String(dayNum);
-                                const cells = pane.querySelectorAll(dayBtnSel);
-                                const btn = Array.from(cells).find(b => (b.textContent || '').trim() === want);
-                                if (!btn) return false;
-                                await clickHumanAsync(btn, 25);
-                                await sleep(200);
-                                return true;
-                            };
-                            const pickPaneDf = (vis, targetAbs) => {
-                                const leftAbs = vis[0].year * 12 + vis[0].monthIdx;
-                                const rightAbs = vis[1].year * 12 + vis[1].monthIdx;
-                                return targetAbs === leftAbs ? leftCalDf : targetAbs === rightAbs ? rightCalDf : leftCalDf;
-                            };
-                            if (await ensureMonthDf(bStart.getMonth(), bStart.getFullYear())) {
-                                const vis = getVisDf(dateFieldDd);
-                                const pane = pickPaneDf(vis, bStart.getFullYear() * 12 + bStart.getMonth());
-                                const startOk = await clickDayInPaneDf(pane, bStart.getDate());
-                                if (startOk && await ensureMonthDf(bEnd.getMonth(), bEnd.getFullYear())) {
-                                    const vis2 = getVisDf(dateFieldDd);
-                                    const pane2 = pickPaneDf(vis2, bEnd.getFullYear() * 12 + bEnd.getMonth());
-                                    const endOk = await clickDayInPaneDf(pane2, bEnd.getDate());
-                                    if (endOk) {
-                                        for (let i = 0; i < 25; i++) {
-                                            const stillOpen = dateFieldDd.offsetParent !== null || (dateFieldDd.getBoundingClientRect?.().height || 0) > 0;
-                                            if (!stillOpen) break;
-                                            await sleep(80);
-                                        }
-                                        const triggerBtn = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
-                                        if (triggerBtn && shown(triggerBtn)) { await clickHumanAsync(triggerBtn, 25); await sleep(200); }
-                                        await sleep(300);
-                                        console.log('[DateLogic] Calendar-click flow done (date-field).');
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Rewritten UI: start/end text inputs, mouse clicks in both (end then start), then close (wait / click outside / Tab / Enter)
-                const startInput = (dr.startInputId && document.getElementById(dr.startInputId)) || (dr.startInputXpath && byXPath(dr.startInputXpath));
-                const endInput = (dr.endInputId && document.getElementById(dr.endInputId)) || (dr.endInputXpath && byXPath(dr.endInputXpath));
-                if (startInput && endInput) {
-                    console.log('[DateLogic] Using start/end text inputs (calendar paths did not run or did not complete).');
-                    const pressKey = (el, key, code, keyCode) => {
-                        const opts = { key, code, keyCode, which: keyCode, view: window, bubbles: true, cancelable: true };
-                        el.dispatchEvent(new KeyboardEvent('keydown', opts));
-                        el.dispatchEvent(new KeyboardEvent('keypress', { ...opts, charCode: keyCode }));
-                        el.dispatchEvent(new KeyboardEvent('keyup', opts));
-                    };
-                    startInput.focus();
-                    await sleep(100);
-                    setNativeValue(startInput, toMDY(bStart));
-                    fire(startInput, 'input');
-                    fire(startInput, 'change');
-                    await sleep(100);
-                    pressKey(startInput, 'Tab', 'Tab', 9);
-                    await sleep(200);
-                    endInput.focus();
-                    await sleep(100);
-                    setNativeValue(endInput, toMDY(bEnd));
-                    fire(endInput, 'input');
-                    fire(endInput, 'change');
-                    await sleep(100);
-                    pressKey(endInput, 'Tab', 'Tab', 9);
-                    await sleep(200);
-                    const triggerBtn = dr.triggerXpath ? byXPath(dr.triggerXpath) : null;
-                    const isOpenNow = () => {
-                        const openEl = dr.dropdownOpenClass && document.querySelector('.' + dr.dropdownOpenClass.replace(/\s+/g, '.'));
-                        if (openEl) return true;
-                        const dd = document.querySelector(dr.dropdownClass);
-                        if (dd && (dd.offsetParent !== null || (dd.getBoundingClientRect?.().height || 0) > 0)) return true;
-                        return !!(startInput.offsetParent !== null || (startInput.getBoundingClientRect?.().height || 0) > 0);
-                    };
-                    if (endInput && shown(endInput)) {
-                        await clickHumanAsync(endInput, 25);
-                        await sleep(150);
-                    }
-                    if (startInput && shown(startInput)) {
-                        await clickHumanAsync(startInput, 25);
-                        await sleep(150);
-                    }
-                    for (let i = 0; i < 25; i++) {
-                        if (!isOpenNow()) break;
-                        await sleep(80);
-                    }
-                    if (!isOpenNow()) { await sleep(200); return true; }
-                    endInput.blur();
-                    await sleep(100);
-                    if (triggerBtn && shown(triggerBtn)) {
-                        await clickHumanAsync(triggerBtn, 25);
-                        await sleep(200);
-                    }
-                    if (!isOpenNow()) { await sleep(200); return true; }
-                    endInput.focus();
-                    await sleep(80);
-                    pressKey(endInput, 'Tab', 'Tab', 9);
-                    await sleep(200);
-                    if (!isOpenNow()) { await sleep(200); return true; }
-                    if (startInput) startInput.focus();
-                    await sleep(80);
-                    endInput.focus();
-                    await sleep(120);
-                    pressKey(endInput, 'Enter', 'Enter', 13);
-                    await sleep(150);
-                    pressKey(endInput, 'Enter', 'Enter', 13);
-                    await sleep(300);
-                    return true;
-                }
-
-                const dd = document.querySelector(dr.dropdownClass);
-                if (!dd) {
-                    return { ok: false, error: '[DATES] Date picker dropdown container not found (selector: ' + (dr.dropdownClass || '') + '). DOM may have changed.' };
-                }
-                const prevBtn = dd.querySelector(dr.navPrev);
-                const nextBtn = dd.querySelector(dr.navNext);
-                const startYearInput = dd.querySelector('#' + START_YR_ID);
-                const endYearInput = dd.querySelector('#' + END_YR_ID);
-                const leftCal = dd.querySelector(dr.leftCalendar);
-                const rightCal = dd.querySelector(dr.rightCalendar);
-                const leftSpan = dd.querySelector(dr.leftSpan);
-                const rightSpan = dd.querySelector(dr.rightSpan);
+                // 2. NAVIGATE & CLICK
+                const dd = document.querySelector(dr.dropdownClass ? '.' + dr.dropdownClass.replace(/^\./, '') : '.ui-duration-field__dropdown');
+                const prevBtn = dd && dd.querySelector(dr.navPrev || 'a[role="button"]:first-of-type');
+                const nextBtn = dd && dd.querySelector(dr.navNext || 'a[role="button"]:last-of-type');
+                const startYearInput = dd && dr.startYearId && dd.querySelector('#' + dr.startYearId);
+                const endYearInput = dd && dr.endYearId && dd.querySelector('#' + dr.endYearId);
+                const leftCal = dd && dd.querySelector(dr.leftCalendar || '.ui-calendar:nth-of-type(1)');
+                const rightCal = dd && dd.querySelector(dr.rightCalendar || '.ui-calendar:nth-of-type(2)');
+                const leftSpan = dd && dd.querySelector(dr.leftSpan || '.ui-duration-field__controls div:nth-of-type(1) span');
+                const rightSpan = dd && dd.querySelector(dr.rightSpan || '.ui-duration-field__controls div:nth-of-type(2) span');
 
                 if (!prevBtn || !nextBtn) {
-                    return { ok: false, error: '[DATES] Date picker calendar controls (prev/next buttons) are missing or hidden' };
+                    console.error('[DateLogic] Calendar controls missing.');
+                    return false;
                 }
 
                 const monthIdx = (name) => ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']
@@ -689,8 +370,8 @@ async function executeBillingOnPage(page, requestData) {
                     for (let i = 0; i < 24; i++) {
                         const { left, right } = getVisibleRange();
                         if (target >= left && target <= right) return true;
-                        if (target < left) clickLikeHuman(prevBtn);
-                        else clickLikeHuman(nextBtn);
+                        if (target < left) M(prevBtn, 'click');
+                        else M(nextBtn, 'click');
                         await sleep(300); // Wait for transition
                     }
                     return false;
@@ -698,41 +379,32 @@ async function executeBillingOnPage(page, requestData) {
 
                 const clickDay = async (pane, date) => {
                     const want = String(date.getDate());
-                    const btns = Array.from(pane.querySelectorAll(dr.dayButton));
+                    const daySel = dr.dayButton || '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]';
+                    const btns = Array.from(pane.querySelectorAll(daySel));
                     const btn = btns.find(b => (b.textContent || '').trim() === want);
-                    if (!btn) return false;
-                    btn.scrollIntoView?.({ block: 'center', inline: 'center' });
-                    await sleep(80);
-                    P(btn, 'pointerdown');
-                    M(btn, 'mousedown');
-                    P(btn, 'pointerup');
-                    M(btn, 'mouseup');
-                    M(btn, 'click');
-                    await sleep(200);
-                    return true;
+                    if (btn) {
+                        M(btn, 'mousedown');
+                        M(btn, 'mouseup');
+                        M(btn, 'click');
+                        await sleep(200);
+                        return true;
+                    }
+                    return false;
                 };
 
                 // CLICK START
-                const startVis = await ensureVis(bStart);
-                if (typeof startVis === 'object' && !startVis.ok) return startVis;
-                if (!startVis) return { ok: false, error: `[DATES] Failed to make start date ${toMDY(bStart)} visible` };
+                if (!await ensureVis(bStart)) return false;
                 let vis = getVisibleRange();
                 let pane = (vis.lYear === bStart.getFullYear() && vis.lMonth === bStart.getMonth()) ? leftCal : rightCal;
                 console.log(`[DateLogic] Clicking Start Day: ${bStart.getDate()}`);
-                const startClick = await clickDay(pane, bStart);
-                if (typeof startClick === 'object' && !startClick.ok) return startClick;
-                if (!startClick) return { ok: false, error: `[DATES] Failed to click start day ${bStart.getDate()}` };
+                if (!await clickDay(pane, bStart)) return false;
 
                 // CLICK END
-                const endVis = await ensureVis(bEnd);
-                if (typeof endVis === 'object' && !endVis.ok) return endVis;
-                if (!endVis) return { ok: false, error: `[DATES] Failed to make end date ${toMDY(bEnd)} visible` };
+                if (!await ensureVis(bEnd)) return false;
                 vis = getVisibleRange();
                 pane = (vis.lYear === bEnd.getFullYear() && vis.lMonth === bEnd.getMonth()) ? leftCal : rightCal;
                 console.log(`[DateLogic] Clicking End Day: ${bEnd.getDate()}`);
-                const endClick = await clickDay(pane, bEnd);
-                if (typeof endClick === 'object' && !endClick.ok) return endClick;
-                if (!endClick) return { ok: false, error: `[DATES] Failed to click end day ${bEnd.getDate()}` };
+                if (!await clickDay(pane, bEnd)) return false;
 
                 // CLOSE/VERIFY
                 // Usually closes automatically or we click out? 
@@ -749,20 +421,21 @@ async function executeBillingOnPage(page, requestData) {
 
             const dateResult = await setDateRangeRobust(dateParams.start, dateParams.end);
             if (!dateResult) {
-                return dateResult; // Propagate detailed error if it returned an object
+                return { ok: false, error: 'Failed to set date range in UI' };
             }
 
             console.log('[Step] Date range UI interaction complete.');
 
             // --- 4. Place of Service Logic (The Beast Part 2) ---
-            currentStep = 'place_of_service';
             console.log('[Step] Setting Place of Service (12 - Home)...');
 
             async function selectHomeRobust() {
-                const place = sel.placeOfService;
-                const PLACE_ID = place.id;
-                const HOME_TEXT = place.homeText;
-                const HOME_VALUE = place.homeValue;
+                const po = sel.placeOfService || {};
+                const PLACE_ID = po.id;
+                const PLACE_OUTER_XPATH = po.xpath;
+                const HOME_TEXT = po.homeText || '12 - Home';
+                const HOME_VALUE = po.homeValue || 'c0d441b4-ba1b-4f68-93af-a4d7d6659fba';
+                const ch = po.choices || {};
 
                 // Local helpers for this scope
                 const byXPath = (xp) => document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue || null;
@@ -775,34 +448,14 @@ async function executeBillingOnPage(page, requestData) {
                     else if (el) el.value = value;
                 };
 
-                // Strategy 1: Find by ID (Stable)
-                const selectEl = document.getElementById(PLACE_ID);
-                if (!selectEl) {
-                    console.warn(`[selectHome] Select element #${PLACE_ID} not found!`);
+                const inner = PLACE_OUTER_XPATH ? byXPath(PLACE_OUTER_XPATH) : null;
+                const selectEl = PLACE_ID ? document.getElementById(PLACE_ID) : null;
+                if (!inner || !selectEl) {
+                    console.warn('[selectHome] Select controls not present yet');
                     return false;
                 }
 
-                // Strategy 1b: Find wrapper via ID relationship or closest
-                // The structure is typically: .choices > .choices__inner > select
-                // OR .choices__inner is a sibling in some DOMs. 
-                // We trust closest('.choices') or parent traversal.
-                const choices = place.choices || {};
-                let inner = selectEl.closest(choices.inner || '.choices__inner');
-                let root = selectEl.closest('.choices');
-                if (!root && place.xpath) {
-                    inner = byXPath(place.xpath);
-                    if (inner) root = inner.closest('.choices') || inner.parentElement;
-                }
-
-                if (!root) {
-                    // Try looking for the label and finding the neighbor?
-                    // User provided HTML shows label for="provided-service-place_of_service"
-                    // The container is next to it.
-                    console.warn('[selectHome] Could not locate Choices root wrapper.');
-                    // attempt raw select set only
-                }
-
-                // 1) Try Choices instance API (Best if available)
+                // 1) Try Choices instance API
                 const inst = selectEl.choices || selectEl._choices || selectEl._instance;
                 if (inst && (typeof inst.setChoiceByValue === 'function' || typeof inst.setValue === 'function')) {
                     try {
@@ -816,37 +469,31 @@ async function executeBillingOnPage(page, requestData) {
                     }
                 }
 
-                if (!root) {
-                    // Last ditch: just set value on select and hope
-                    selectEl.value = HOME_VALUE;
-                    fire(selectEl, 'change');
-                    return true;
-                }
-
-                // helpers to open dropdown and find list
+                const root = inner.closest('.choices') || inner.parentElement || inner;
                 const openDropdown = () => {
-                    const opener = root.querySelector(choices.inner || '.choices__inner') || root;
-                    if (opener) {
-                        mouse(opener, 'mousedown');
-                        mouse(opener, 'mouseup');
-                        mouse(opener, 'click');
-                    }
+                    const opener = (ch.inner && root.querySelector(ch.inner)) || root;
+                    mouse(opener, 'mousedown');
+                    mouse(opener, 'mouseup');
+                    mouse(opener, 'click');
                 };
-
                 const getList = () =>
-                    root.querySelector(choices.listDropdownExpanded || '.choices__list--dropdown[aria-expanded="true"] .choices__list[role="listbox"]') ||
-                    root.querySelector(choices.listDropdown || '.choices__list--dropdown .choices__list[role="listbox"]');
+                    (ch.listDropdownExpanded && root.querySelector(ch.listDropdownExpanded)) ||
+                    (ch.listDropdown && root.querySelector(ch.listDropdown));
 
                 // 2) UI: open dropdown and try to click the option node directly
                 openDropdown();
                 for (let i = 0; i < 10; i++) {
                     const list = getList();
                     if (list?.children?.length) {
-                        const optSel = choices.option || '.choices__item[role="option"]';
+                        const optSel = ch.option || '.choices__item[role="option"]';
                         let optionNode =
-                            list.querySelector(`[data-value="${HOME_VALUE}"]`) ||
-                            Array.from(list.querySelectorAll(optSel)).find(n => (n.textContent || '').trim().toLowerCase() === HOME_TEXT.toLowerCase()) ||
-                            Array.from(list.querySelectorAll(optSel)).find(n => (n.textContent || '').toLowerCase().includes('home'));
+                            list.querySelector('[data-value="' + HOME_VALUE + '"]') ||
+                            Array.from(list.querySelectorAll(optSel)).find(n =>
+                                (n.textContent || '').trim().toLowerCase() === (HOME_TEXT || '').toLowerCase()
+                            ) ||
+                            Array.from(list.querySelectorAll(optSel)).find(n =>
+                                (n.textContent || '').toLowerCase().includes('home')
+                            );
 
                         if (optionNode) {
                             optionNode.scrollIntoView({ block: 'nearest' });
@@ -865,10 +512,11 @@ async function executeBillingOnPage(page, requestData) {
                     await sleep(100);
                 }
 
-                // 3) UI: type in the Choices search input and press Enter
                 openDropdown();
                 await sleep(80);
-                const searchInput = root.querySelector(choices.searchInput || '.choices__input--cloned') || root.querySelector(choices.searchInputAlt || 'input[type="text"].choices__input');
+                const searchInput =
+                    (ch.searchInput && root.querySelector(ch.searchInput)) ||
+                    (ch.searchInputAlt && root.querySelector(ch.searchInputAlt));
                 if (searchInput) {
                     setNativeValue(searchInput, 'home');
                     fire(searchInput, 'input');
@@ -886,14 +534,13 @@ async function executeBillingOnPage(page, requestData) {
                     }
                 }
 
-                // 4) Fallback: set <select> value directly and update visible text
-                const byValue = selectEl.querySelector(`option[value="${HOME_VALUE}"]`);
+                const byValue = selectEl.querySelector('option[value="' + HOME_VALUE + '"]');
                 const byText = Array.from(selectEl.options || []).find(o => (o.textContent || '').toLowerCase().includes('home'));
                 const target = byValue || byText;
                 if (target) {
                     selectEl.value = target.value;
                     fire(selectEl, 'change');
-                    const single = root.querySelector(choices.singleSelected || '.choices__list--single .choices__item');
+                    const single = (ch.singleSelected && root.querySelector(ch.singleSelected));
                     if (single) {
                         single.textContent = (target.textContent || HOME_TEXT).trim();
                         single.classList.remove('choices__placeholder');
@@ -908,13 +555,13 @@ async function executeBillingOnPage(page, requestData) {
 
             const homeSuccess = await selectHomeRobust();
             if (!homeSuccess) {
-                return { ok: false, error: '[DROPDOWN] Could not find or select "12 - Home" in the Place of Service dropdown' };
+                return { ok: false, error: 'Failed to select Place of Service (12 - Home)' };
             }
 
             // --- 5. File Upload Logic (Browser-Side Fetch) ---
-            currentStep = 'upload';
-            if (data.proofURL) {
-                console.log(`[Step] Uploading file from URL: ${data.proofURL}`);
+            const proofUrls = Array.isArray(data.proofURL) ? data.proofURL : (data.proofURL ? [data.proofURL] : []);
+            if (proofUrls.length > 0) {
+                console.log(`[Step] Uploading ${proofUrls.length} proof file(s) from URL(s)...`);
 
                 async function uploadFileRobust(url, filename) {
                     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -931,11 +578,9 @@ async function executeBillingOnPage(page, requestData) {
                         return false;
                     }
 
-                    // 2. Find "Attach Document" button
-                    // Note: User's HTML shows specific ID: #payments-attachment-button-...
-                    // But we keep the text search as fallback or primary if IDs are dynamic.
+                    const pu = sel.proofUpload || {};
+                    const attachText = pu.attachButtonText || 'Attach Document';
                     let attachBtn = null;
-                    const attachText = (sel.proofUpload && sel.proofUpload.attachButtonText) || 'Attach Document';
                     const findBtn = () => {
                         const btns = Array.from(document.querySelectorAll('button'));
                         return btns.find(b => (b.textContent || '').includes(attachText) && b.offsetParent !== null);
@@ -946,32 +591,31 @@ async function executeBillingOnPage(page, requestData) {
                         if (attachBtn) break;
                         await sleep(100);
                     }
-                    if (!attachBtn) { console.error('[Upload] Attach button not found'); return { ok: false, error: '[UPLOAD] Could not find "Attach Document" button' }; }
+                    if (!attachBtn) { console.error('[Upload] Attach button not found'); return false; }
 
                     console.log('[Upload] Clicking Attach Document...');
                     attachBtn.click();
                     await sleep(1000);
 
-                    // 3. Find Dialog & Input
+                    const mo = pu.modal || {};
+                    const fi2 = pu.fileInput || {};
                     let modal = null, input = null, submitBtn = null;
-                    const proof = sel.proofUpload || {};
-                    const modalCfg = proof.modal || {};
-                    const fileCfg = proof.fileInput || {};
                     for (let i = 0; i < 30; i++) {
-                        modal = document.getElementById(modalCfg.id || 'upload-payments-documents') ||
-                            document.querySelector('.' + (modalCfg.classFallback || 'dialog-paper').replace(/^\./, '')) ||
-                            document.querySelector(modalCfg.roleFallback || '[role="dialog"]');
+                        modal = (mo.id && document.getElementById(mo.id)) ||
+                            (mo.classFallback && document.querySelector('.' + mo.classFallback.replace(/^\./, ''))) ||
+                            (mo.roleFallback && document.querySelector(mo.roleFallback));
+
                         if (modal && modal.offsetParent !== null) {
-                            input = modal.querySelector('input[data-testid="' + (fileCfg.dataTestId || 'file-upload-input') + '"]');
-                            if (!input) input = modal.querySelector(fileCfg.typeFallback || 'input[type="file"]');
-                            submitBtn = modal.querySelector('.' + (proof.saveButtonClass || 'attach-document-dialog__actions--save').replace(/^\./, ''));
+                            input = (fi2.dataTestId && modal.querySelector('input[data-testid="' + fi2.dataTestId + '"]')) ||
+                                (fi2.typeFallback && modal.querySelector(fi2.typeFallback));
+                            submitBtn = (pu.saveButtonClass && modal.querySelector('.' + pu.saveButtonClass.replace(/^\./, '')));
 
                             if (input && submitBtn) break;
                         }
                         await sleep(200);
                     }
 
-                    if (!modal || !input) { console.error('[Upload] Upload dialog/input not found'); return { ok: false, error: '[UPLOAD] File upload dialog or input field not found' }; }
+                    if (!modal || !input) { console.error('[Upload] Upload dialog/input not found'); return false; }
 
                     // 4. Set File (DataTransfer Magic)
                     // Use blob.type to support images (image/png, etc.) or PDFs automatically
@@ -988,10 +632,9 @@ async function executeBillingOnPage(page, requestData) {
                     console.log(`[Upload] File set in input: ${filename} (${fileType}). Waiting for validation...`);
                     await sleep(1000);
 
-                    // 5. Click Attach
-                    const disabledClass = (proof.disabledClass || 'opacity-40').replace(/^\./, '');
+                    const disabledCls = pu.disabledClass || 'opacity-40';
                     for (let i = 0; i < 30; i++) {
-                        if (!submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true' && !submitBtn.classList.contains(disabledClass)) {
+                        if (!submitBtn.disabled && submitBtn.getAttribute('aria-disabled') !== 'true' && !submitBtn.classList.contains(disabledCls)) {
                             console.log('[Upload] Button enabled. Clicking...');
                             submitBtn.click();
                             await sleep(2000); // Wait for upload/close
@@ -999,19 +642,25 @@ async function executeBillingOnPage(page, requestData) {
                         }
                         await sleep(200);
                     }
-                    return { ok: false, error: '[UPLOAD] File "Attach" button remained disabled (upload might have failed)' };
+                    console.error('[Upload] Attach button never enabled');
+                    return false;
                 }
 
-                const uploadOk = await uploadFileRobust(data.proofURL, data.fileName || 'proof.png');
-                if (!uploadOk) {
-                    return uploadOk; // Propagate detailed error
+                for (let idx = 0; idx < proofUrls.length; idx++) {
+                    const url = proofUrls[idx];
+                    const filename = url.split('/').pop() || `proof-${idx + 1}`;
+                    console.log(`[Step] Uploading proof ${idx + 1}/${proofUrls.length}: ${url}`);
+                    const uploadOk = await uploadFileRobust(url, filename);
+                    if (!uploadOk) {
+                        return { ok: false, error: `Failed to upload proof file ${idx + 1} of ${proofUrls.length} from URL` };
+                    }
                 }
+                console.log(`[Step] All ${proofUrls.length} proof file(s) uploaded.`);
             } else {
                 console.log('[Step] No proofURL provided, skipping upload.');
             }
 
             // --- 6. Fill Dependants (If Present) ---
-            currentStep = 'dependants';
             if (data.dependants && Array.isArray(data.dependants) && data.dependants.length > 0) {
                 console.log('[Step] Processing Dependants:', data.dependants.length);
 
@@ -1046,17 +695,12 @@ async function executeBillingOnPage(page, requestData) {
                 });
 
                 console.log('[Step] Dependants Strings Generated');
-                const dep = sel.dependants || {};
-                const NAME_ID = (dep.name && dep.name.id) || 'household_member_name_s_first_and_last';
-                const NAME_XP = (dep.name && dep.name.xpath) || '';
-                const DOB_ID = (dep.dob && dep.dob.id) || 'household_member_date_of_birth_s';
-                const DOB_XP = (dep.dob && dep.dob.xpath) || '';
-                const CIN_ID = (dep.cin && dep.cin.id) || 'household_member_cin_s';
-                const CIN_XP = (dep.cin && dep.cin.xpath) || '';
 
-                // Helper to fill Text area
-                const fillArea = (id, xp, value) => {
-                    const el = document.getElementById(id) || byXPath(xp);
+                const dep = sel.dependants || {};
+                const fillArea = (field, value) => {
+                    const id = field && field.id;
+                    const xp = field && field.xpath;
+                    const el = (id && document.getElementById(id)) || (xp && byXPath(xp));
                     if (el) {
                         el.focus();
                         setNativeValue(el, value);
@@ -1068,13 +712,13 @@ async function executeBillingOnPage(page, requestData) {
                     return false;
                 };
 
-                if (fillArea(NAME_ID, NAME_XP, nameStr)) console.log('Filled Dependant Names');
+                if (fillArea(dep.name, nameStr)) console.log('Filled Dependant Names');
                 else console.warn('Failed to find Dependant Name Field');
 
-                if (fillArea(DOB_ID, DOB_XP, dobStr)) console.log('Filled Dependant DOBs');
+                if (fillArea(dep.dob, dobStr)) console.log('Filled Dependant DOBs');
                 else console.warn('Failed to find Dependant DOB Field');
 
-                if (fillArea(CIN_ID, CIN_XP, cinStr)) console.log('Filled Dependant CINs');
+                if (fillArea(dep.cin, cinStr)) console.log('Filled Dependant CINs');
                 else console.warn('Failed to find Dependant CIN Field');
 
             } else {
@@ -1083,21 +727,24 @@ async function executeBillingOnPage(page, requestData) {
 
 
             // --- 4. Submit ---
-            currentStep = 'submit';
+            const sub = sel.submit || {};
+            const devSkip = !!sub.devSkipSubmit;
+
+            if (devSkip) {
+                console.log('[Step] DEV: Submit skipped (devSkipSubmit).');
+                return { ok: true, amount, days, verified: false, devSkippedSubmit: true };
+            }
+
             console.log('[Step] Submitting billing record...');
-            const submitId = (sel.submit && sel.submit.id) || 'fee-schedule-provided-service-post-note-btn';
-            const submitBtn = document.getElementById(submitId);
+            const subId = sub.id || 'fee-schedule-provided-service-post-note-btn';
+            const submitBtn = document.getElementById(subId);
 
             if (submitBtn) {
-                // Comment the next line for test mode
                 clickLikeHuman(submitBtn);
-                console.log('[Step] Submit button FOUND but and clicked.');
-                await sleep(3000); // Wait for UI to react
+                await sleep(3000);
 
-                // --- 5. Verify Success ---
                 console.log('[Step] Verifying submission...');
                 let found = false;
-                // Poll for 10 seconds checking for the new record
                 for (let i = 0; i < 20; i++) {
                     if (doInlineScanFallback(reqStart, reqEnd, amount)) {
                         found = true;
@@ -1113,15 +760,7 @@ async function executeBillingOnPage(page, requestData) {
                     return { ok: true, amount, days, verified: false, warning: 'Billing attempted but not verified in list' };
                 }
             } else {
-                return { ok: false, error: '[SUBMIT] Could not find final "Post" button to submit billing record' };
-            }
-
-            return { ok: true, amount, days };
-
-            } catch (e) {
-                const msg = (e && e.message) || String(e);
-                const type = classifyError(msg);
-                throw new Error('[STEP:' + currentStep + '] [TYPE:' + type + '] ' + msg);
+                return { ok: false, error: 'Submit button (' + subId + ') not found' };
             }
 
             // =========================================================================
