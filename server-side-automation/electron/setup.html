@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Billing Automation – Setup</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --bg-card: #1e293b;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --success: #10b981;
+      --error: #ef4444;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 420px;
+    }
+    h1 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1.35rem;
+      font-weight: 600;
+    }
+    .sub {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 1.5rem;
+    }
+    label {
+      display: block;
+      font-size: 0.875rem;
+      font-weight: 500;
+      margin-bottom: 0.35rem;
+      color: var(--text-muted);
+    }
+    input[type="text"],
+    input[type="email"],
+    input[type="password"],
+    input[type="number"] {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      margin-bottom: 1rem;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-main);
+      font-size: 1rem;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .row input[type="checkbox"] {
+      width: auto;
+      margin: 0;
+    }
+    .row label { margin: 0; }
+    .btn {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      margin-top: 0.5rem;
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:hover { filter: brightness(1.1); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .msg {
+      font-size: 0.875rem;
+      margin-top: 1rem;
+      padding: 0.5rem 0;
+      min-height: 1.5rem;
+    }
+    .msg.error { color: var(--error); }
+    .msg.success { color: var(--success); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Billing Automation</h1>
+    <p class="sub">Enter your Uniteus login details. They are stored only on this device.</p>
+    <form id="form">
+      <label for="email">Uniteus email</label>
+      <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+      <label for="password">Uniteus password</label>
+      <input type="password" id="password" name="password" placeholder="••••••••" required autocomplete="current-password">
+      <label for="port">Server port (optional)</label>
+      <input type="number" id="port" name="port" value="3500" min="1024" max="65535" placeholder="3500">
+      <div class="row">
+        <input type="checkbox" id="headless" name="headless">
+        <label for="headless">Run browser in headless mode (no visible window)</label>
+      </div>
+      <button type="submit" class="btn" id="saveBtn">Save and launch</button>
+    </form>
+    <p class="msg" id="msg" role="status"></p>
+  </div>
+  <script src="setup-renderer.js"></script>
+</body>
+</html>

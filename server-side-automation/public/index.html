@@ -4,15 +4,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DF Billing Automation</title>
+    <title>Triangle Square Automation</title>
     <link rel="stylesheet" href="/style.css">
 </head>
 
 <body>
     <div class="container">
         <header>
-            <h1>DF Billing Automation</h1>
-            <div id="connection-status" class="badge">Connecting...</div>
+            <h1>Triangle Square automation</h1>
+            <div class="header-badges">
+                <span id="device-badge" class="badge badge-muted" title="This computer's device ID" style="display: none;">Device: <b id="device-id">–</b></span>
+                <span id="cpu-usage" class="badge badge-muted" title="Process CPU usage">CPU: –%</span>
+                <span id="browser-count" class="badge badge-muted" title="Parallel browser slots">Browsers: <b id="browser-count-n">–</b></span>
+                <div id="connection-status" class="badge">Connecting...</div>
+            </div>
         </header>
 
         <section class="summary-bar">
@@ -22,11 +27,22 @@
             </div>
         </section>
 
-        <section class="controls">
+        <section class="runners-section" id="runners-section" style="display: none;">
+            <h3 class="runners-title">Active runs</h3>
+            <div id="runners-grid" class="runners-grid">
+                <!-- Runner cards injected by client.js -->
+            </div>
+        </section>
+
+        <section class="controls" id="controls-section">
+            <div id="device-unauthorized-banner" class="device-unauthorized-banner" style="display: none;">
+                This device is not authorized. Device ID: <strong id="unauthorized-device-id"></strong> — add it to the allowed list to use automation.
+            </div>
             <button id="btn-run-queue" onclick="runCurrentQueue()" style="background: #10b981;">▶ Run current queue</button>
-            <button id="btn-start" onclick="triggerProcess('file')">▶ Start from File</button>
-            <button id="btn-start-api" onclick="triggerProcess('api')" style="background: #2563eb;">☁ Start from Server</button>
+            <button id="btn-load-file" onclick="loadFromFile()">📂 Load from File</button>
             <button id="btn-download" onclick="downloadCloudRequests()" style="background: #0ea5e9;">⬇ Download from Server</button>
+            <button id="btn-import-excel" type="button">📥 Import from Excel</button>
+            <input type="file" id="excel-file-input" accept=".xlsx,.xls,.csv" style="display: none;">
             <button id="btn-stop" onclick="stopProcess()" 
                 style="background: #ef4444; display: none;">⏹ Stop Process</button>
 
@@ -53,11 +69,15 @@
                     <table>
                         <thead>
                             <tr>
-                                <th class="col-select"><input type="checkbox" id="select-all" title="Select all visible" aria-label="Select all"></th>
+                                <th class="col-select" title="Select all visible / Shift+click or drag for range">
+                                    <input type="checkbox" id="select-all" title="Select all visible" aria-label="Select all">
+                                    <span class="select-actions"><button type="button" id="select-none" class="link-btn" title="Clear selection">None</button></span>
+                                </th>
                                 <th>Client</th>
                                 <th class="col-orders">Orders</th>
                                 <th class="col-amount">Amount</th>
                                 <th>Dates</th>
+                                <th class="col-equipment">Equipment</th>
                                 <th>Status</th>
                                 <th>Message</th>
                             </tr>
@@ -76,7 +96,29 @@
                 </div>
             </section>
         </div>
+        <!-- Excel import: column mapping modal -->
+        <div id="excel-import-modal" class="modal-overlay" style="display: none;" aria-hidden="true">
+            <div class="modal-card">
+                <h3>Map columns to billing fields</h3>
+                <p class="modal-hint">Choose which Excel column contains each field. URL, Date, Amount, Proof URL and Equipment are required (cannot skip). Name is optional. Rows with empty required fields are skipped. Imported rows have no order IDs, so status is not sent back to the server—billing still runs in Unite.</p>
+                <div class="modal-mapping">
+                    <label><span>URL</span> <select id="map-url" aria-label="Column for URL"></select></label>
+                    <label><span>Date</span> <select id="map-date" aria-label="Column for Date"></select></label>
+                    <label><span>Amount</span> <select id="map-amount" aria-label="Column for Amount"></select></label>
+                    <label><span>Proof URL</span> <select id="map-proofURL" aria-label="Column for Proof URL"></select></label>
+                    <label><span>Equipment</span> <select id="map-equipment" aria-label="Column for Equipment"></select></label>
+                    <label><span>Name <em>(optional)</em></span> <select id="map-name" aria-label="Column for Name (optional)"></select></label>
+                </div>
+                <div class="modal-preview" id="excel-preview"></div>
+                <div class="modal-actions">
+                    <button id="excel-save-file" type="button">Save to Billing File</button>
+                    <button id="excel-download-json" type="button">Download JSON</button>
+                    <button id="excel-cancel" type="button">Cancel</button>
+                </div>
+            </div>
+        </div>
     </div>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
     <script src="/client.js"></script>
 </body>
 

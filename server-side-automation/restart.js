@@ -1,42 +1,21 @@
 #!/usr/bin/env node
 
+require('dotenv').config();
 const { execSync } = require('child_process');
 const { spawn } = require('child_process');
 
 const PORT = process.env.PORT || 3500;
 
-console.log(`Checking for processes on port ${PORT}...`);
-
+console.log(`Killing any process on port ${PORT}...`);
 try {
-    // Find processes using the port
-    const pids = execSync(`lsof -ti:${PORT}`, { encoding: 'utf8' }).trim();
-    
-    if (pids) {
-        console.log(`Found processes on port ${PORT}: ${pids}`);
-        console.log('Killing processes...');
-        
-        // Kill each process
-        pids.split('\n').forEach(pid => {
-            try {
-                execSync(`kill ${pid.trim()}`);
-            } catch (e) {
-                // Process might already be dead, ignore
-            }
-        });
-        
-        // Wait a moment for cleanup
-        setTimeout(() => {
-            startServer();
-        }, 2000);
-    } else {
-        console.log(`No processes found on port ${PORT}.`);
-        startServer();
-    }
+    execSync(`lsof -ti:${PORT} | xargs kill -9 2>/dev/null`, { encoding: 'utf8' });
+    console.log('Done. Waiting for port to be released...');
 } catch (e) {
-    // No processes found, that's fine
-    console.log(`No processes found on port ${PORT}.`);
-    startServer();
+    // lsof exits non-zero when no PIDs found; that's fine
 }
+setTimeout(() => {
+    startServer();
+}, 2000);
 
 function startServer() {
     console.log('Starting server...');

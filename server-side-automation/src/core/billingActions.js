@@ -257,19 +257,129 @@ async function executeBillingOnPage(page, requestData) {
             await sleep(500);
 
             // --- 4. Date Picker Logic (The Beast) ---
-            console.log('[Step] Setting Date Range in UI...');
+            // Period of Service: "Single Date" (equipment) or "Date Range" (default). We select the radio first; only then open the range picker for non-equipment.
+            const isEquipment = data.equipment === true || data.equipment === 'true' || data.equtment === true || data.equtment === 'true';
+            console.log(isEquipment ? '[Step] Setting date (equipment: Single Date).' : '[Step] Setting Date Range in UI...');
 
             // ===== Robust Date Picker Logic (Ported from Extension) =====
-            async function setDateRangeRobust(bStart, bEnd) {
-                console.log(`[DateLogic] Setting range: ${toMDY(bStart)} -> ${toMDY(bEnd)}`);
+            async function setDateForRequest(bStart, bEnd, isEquip) {
                 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
                 const M = (el, t) => el && el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }));
                 const P = (el, t) => el && el.dispatchEvent(new PointerEvent(t, { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
                 const clickLikeHuman = (el) => { P(el, 'pointerdown'); M(el, 'mousedown'); P(el, 'pointerup'); M(el, 'mouseup'); M(el, 'click'); };
 
+                const po = sel.periodOfService || {};
                 const dr = sel.dateRange;
                 const fi = dr.fakeInput || {};
+
+                // 1) Select Period of Service: "Single Date" for equipment, "Date Range" for non-equipment (do not click Date Range for equipment).
+                const selectPeriodOfService = async (useSingleDate) => {
+                    const radioId = useSingleDate ? (po.singleDateRadioId || 'provided-service-period-of-service-0') : (po.dateRangeRadioId || 'provided-service-period-of-service-1');
+                    const value = useSingleDate ? (po.singleDateLabelText || 'Single Date') : (po.dateRangeLabelText || 'Date Range');
+                    const name = po.radioName || 'provided_service.period_of_service';
+                    const radio = document.getElementById(radioId) ||
+                        document.querySelector(`input[name="${name}"][value="${value}"]`) ||
+                        (() => {
+                            const label = Array.from(document.querySelectorAll('label')).find((l) => (l.textContent || '').trim() === value);
+                            return label && label.getAttribute('for') ? document.getElementById(label.getAttribute('for')) : null;
+                        })();
+                    if (!radio) {
+                        console.error('[DateLogic] Period of Service radio not found:', value);
+                        return false;
+                    }
+                    if (!radio.checked) {
+                        console.log('[DateLogic] Selecting Period of Service:', value);
+                        clickLikeHuman(radio);
+                        await sleep(400);
+                        const labelFor = document.querySelector(`label[for="${radioId}"]`);
+                        if (labelFor && !radio.checked) clickLikeHuman(labelFor);
+                        await sleep(300);
+                    }
+                    return true;
+                };
+
+                if (!await selectPeriodOfService(!!isEquip)) {
+                    return false;
+                }
+
+                if (isEquip) {
+                    // Equipment: "Single Date" selected. Open single-date calendar and select bStart.
+                    const sd = sel.singleDate || {};
+                    const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+                    const MONTH_ABBREV = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+                    const getSingleDateTrigger = () => {
+                        const el = (sd.triggerSelector && document.querySelector(sd.triggerSelector)) || null;
+                        if (el) return el;
+                        const container = sd.triggerXpath && byXPath(sd.triggerXpath);
+                        return container ? (container.querySelector('a[role="button"]') || container) : null;
+                    };
+                    const openSingleDateCalendar = async () => {
+                        const trigger = getSingleDateTrigger();
+                        if (!trigger) { console.error('[DateLogic] Single-date trigger not found.'); return false; }
+                        trigger.scrollIntoView?.({ block: 'center', inline: 'center' });
+                        await sleep(80);
+                        clickLikeHuman(trigger);
+                        await sleep(250);
+                        return true;
+                    };
+                    const getSingleDateOpenDropdown = () => {
+                        const openClass = (sd.dropdownOpenClass || 'ui-date-field__dropdown--open').replace(/\s+/g, '.');
+                        const dd = document.querySelector((sd.dropdownSelector || '.ui-date-field__dropdown') + '.' + openClass);
+                        return dd && (dd.querySelector('.ui-calendar') || dd.querySelector('.ui-date-field__controls')) ? dd : null;
+                    };
+                    const getVisibleMonthYear = () => {
+                        const dd = getSingleDateOpenDropdown();
+                        if (!dd) return null;
+                        const yearInp = dd.querySelector('#' + (sd.yearInputId || 'provided-service-date-year-input')) || (sd.yearInputId && document.getElementById(sd.yearInputId));
+                        const block = yearInp && yearInp.parentElement && dd.contains(yearInp) ? yearInp.parentElement : (sd.monthYearDivXpath && byXPath(sd.monthYearDivXpath)) || dd.querySelector('.ui-date-field__controls > div');
+                        if (!block) return null;
+                        const span = block.querySelector('span');
+                        const year = yearInp ? parseInt(yearInp.value, 10) : NaN;
+                        if (!span || !Number.isFinite(year)) return null;
+                        const monthText = (span.textContent || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+                        if (!monthText) return null;
+                        const first3 = monthText.substring(0, 3);
+                        const monthIdx = MONTH_ABBREV.indexOf(first3);
+                        return monthIdx >= 0 ? { month: monthIdx, year } : null;
+                    };
+                    const clickSingleDateMonthNav = async (prevNotNext) => {
+                        const xpath = prevNotNext ? sd.prevMonthXpath : sd.nextMonthXpath;
+                        const btn = xpath ? byXPath(xpath) : null;
+                        if (!btn) return false;
+                        clickLikeHuman(btn);
+                        await sleep(120);
+                        return true;
+                    };
+                    const navigateSingleDateToMonth = async (targetMonth, targetYear) => {
+                        for (let i = 0; i < 24; i++) {
+                            const cur = getVisibleMonthYear();
+                            if (!cur) return false;
+                            if (cur.month === targetMonth && cur.year === targetYear) return true;
+                            if (cur.year < targetYear || (cur.year === targetYear && cur.month < targetMonth)) await clickSingleDateMonthNav(false);
+                            else await clickSingleDateMonthNav(true);
+                        }
+                        return false;
+                    };
+                    const clickSingleDateDay = (dayNum) => {
+                        const cal = sd.calendarPaneXpath ? byXPath(sd.calendarPaneXpath) : null;
+                        if (!cal) return false;
+                        const dayButtons = cal.querySelectorAll(sd.dayCellSelector || '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]');
+                        const want = String(dayNum);
+                        const btn = Array.from(dayButtons).find(b => (b.textContent || '').trim() === want);
+                        if (!btn) return false;
+                        clickLikeHuman(btn);
+                        return true;
+                    };
+                    console.log('[DateLogic] Equipment: opening single-date calendar and selecting', toMDY(bStart));
+                    if (!await openSingleDateCalendar()) return false;
+                    await sleep(80);
+                    if (!await navigateSingleDateToMonth(bStart.getMonth(), bStart.getFullYear())) return false;
+                    await sleep(50);
+                    if (!clickSingleDateDay(bStart.getDate())) return false;
+                    await sleep(100);
+                    return true;
+                }
 
                 const isOpen = () => !!document.querySelector('.' + (dr.dropdownOpenClass || 'ui-duration-field__dropdown ui-duration-field__dropdown--open').replace(/\s+/g, '.'));
 
@@ -281,37 +391,32 @@ async function executeBillingOnPage(page, requestData) {
                     return [a, b, c, d].filter(Boolean);
                 };
 
-                const openPicker = async () => {
+                // 2) Open the Date Range picker (click the date range trigger — only for non-equipment; we already selected "Date Range" above).
+                const openDateRangePicker = async () => {
                     if (isOpen()) return true;
 
                     const label = (dr.labelId && document.getElementById(dr.labelId)) || (dr.labelXpath && byXPath(dr.labelXpath));
 
                     const tryOnce = async () => {
                         const cands = getFakeCandidates();
-                        console.log('[DateLogic] Attempting to open picker...');
+                        console.log('[DateLogic] Opening date range picker...');
 
-                        // 1) Label tap (some builds need it to reveal inputs)
                         if (label && shown(label)) {
-                            console.log('[DateLogic] Clicking label specificially...');
                             clickLikeHuman(label);
                             await sleep(120);
                             if (isOpen()) return true;
                         }
 
-                        // 2) Try all fake candidates
                         for (const el of cands) {
                             if (!shown(el)) continue;
-                            console.log('[DateLogic] Clicking candidate:', el.tagName, el.className);
                             el.scrollIntoView?.({ block: 'center', inline: 'center' });
                             await sleep(40);
                             clickLikeHuman(el);
                             for (let i = 0; i < 10; i++) { if (isOpen()) return true; await sleep(60); }
                         }
 
-                        // 3) Keyboard fallback on best candidate
                         const best = cands.find(shown);
                         if (best) {
-                            console.log('[DateLogic] Trying keyboard fallback...');
                             best.focus?.();
                             best.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
                             best.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true, cancelable: true }));
@@ -331,7 +436,7 @@ async function executeBillingOnPage(page, requestData) {
                     return isOpen();
                 };
 
-                if (!await openPicker()) {
+                if (!await openDateRangePicker()) {
                     console.error('[DateLogic] Failed to open date picker after robust attempts.');
                     return false;
                 }
@@ -413,18 +518,18 @@ async function executeBillingOnPage(page, requestData) {
                 return true;
             }
 
-            // Excecute the robust logic
+            // Execute: equipment skips only the date range button; non-equipment opens it and sets start/end.
             const dateParams = {
                 start: new Date(sY, sM - 1, sD),
                 end: new Date(eY, eM - 1, eD)
             };
 
-            const dateResult = await setDateRangeRobust(dateParams.start, dateParams.end);
+            const dateResult = await setDateForRequest(dateParams.start, dateParams.end, isEquipment);
             if (!dateResult) {
                 return { ok: false, error: 'Failed to set date range in UI' };
             }
 
-            console.log('[Step] Date range UI interaction complete.');
+            console.log('[Step] Date step complete.');
 
             // --- 4. Place of Service Logic (The Beast Part 2) ---
             console.log('[Step] Setting Place of Service (12 - Home)...');
@@ -646,16 +751,22 @@ async function executeBillingOnPage(page, requestData) {
                     return false;
                 }
 
+                let uploadSuccessCount = 0;
                 for (let idx = 0; idx < proofUrls.length; idx++) {
                     const url = proofUrls[idx];
                     const filename = url.split('/').pop() || `proof-${idx + 1}`;
                     console.log(`[Step] Uploading proof ${idx + 1}/${proofUrls.length}: ${url}`);
                     const uploadOk = await uploadFileRobust(url, filename);
-                    if (!uploadOk) {
-                        return { ok: false, error: `Failed to upload proof file ${idx + 1} of ${proofUrls.length} from URL` };
+                    if (uploadOk) {
+                        uploadSuccessCount++;
+                    } else {
+                        console.warn(`[Step] Proof ${idx + 1}/${proofUrls.length} failed to upload; continuing with others.`);
                     }
                 }
-                console.log(`[Step] All ${proofUrls.length} proof file(s) uploaded.`);
+                if (uploadSuccessCount === 0) {
+                    return { ok: false, error: `Failed to upload any of ${proofUrls.length} proof file(s) from URL` };
+                }
+                console.log(`[Step] ${uploadSuccessCount}/${proofUrls.length} proof file(s) uploaded successfully.`);
             } else {
                 console.log('[Step] No proofURL provided, skipping upload.');
             }
@@ -733,6 +844,14 @@ async function executeBillingOnPage(page, requestData) {
             if (devSkip) {
                 console.log('[Step] DEV: Submit skipped (devSkipSubmit).');
                 return { ok: true, amount, days, verified: false, devSkippedSubmit: true };
+            }
+
+            // Pre-submit: if page shows validation errors, fail with first message (no click).
+            const errorParagraphs = document.querySelectorAll('p.text-red.text-13px');
+            if (errorParagraphs.length > 0) {
+                const firstMessage = errorParagraphs[0].textContent.trim();
+                console.log('[Step] Validation errors on page (' + errorParagraphs.length + '). Failing with first: ' + firstMessage);
+                return { ok: false, error: firstMessage };
             }
 
             console.log('[Step] Submitting billing record...');

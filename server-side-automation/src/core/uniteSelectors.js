@@ -127,8 +127,21 @@ module.exports = {
       datesDataTest: ['service-dates-value', 'service-start-date-value']
     },
 
+    // ----- Period of Service (Single Date vs Date Range) ---------------------
+    /** Radios: "Single Date" or "Date Range". Select one before date UI is visible. */
+    periodOfService: {
+      /** Radio id for "Single Date" (equipment uses this). */
+      singleDateRadioId: 'provided-service-period-of-service-0',
+      /** Radio id for "Date Range" (default; opens two-calendar range picker). */
+      dateRangeRadioId: 'provided-service-period-of-service-1',
+      singleDateLabelText: 'Single Date',
+      dateRangeLabelText: 'Date Range',
+      /** Name attribute on both radios (fallback). */
+      radioName: 'provided_service.period_of_service'
+    },
+
     // ----- Date range picker -------------------------------------------------
-    /** Date range field. Opens the duration picker dropdown. */
+    /** Date range field. Opens the duration picker dropdown (only when "Date Range" is selected). */
     dateRange: {
       /** Main button/trigger for the date range. */
       buttonId: 'provided-service-dates',
@@ -158,6 +171,24 @@ module.exports = {
       rightSpan: '.ui-duration-field__controls div:nth-of-type(2) span',
       /** Clickable day elements (exclude out-of-month). */
       dayButton: '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]'
+    },
+
+    // ----- Single-date picker (equipment: when "Single Date" is selected) -----
+    /** One calendar; open via trigger, then select one day. */
+    singleDate: {
+      triggerSelector: 'a[aria-controls="provided-service-date"]',
+      triggerXpath: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div/div[2]/div/form/div[4]/div[2]/div/div/div[1]',
+      dropdownOpenClass: 'ui-date-field__dropdown--open',
+      dropdownSelector: '.ui-date-field__dropdown',
+      controlsSelector: '.ui-date-field__controls',
+      yearInputId: 'provided-service-date-year-input',
+      monthYearDivXpath: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div/div[2]/div/form/div[4]/div[2]/div/div/div[2]/div[1]/div',
+      prevMonthLabel: 'Previous Month:',
+      nextMonthLabel: 'Next Month:',
+      prevMonthXpath: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div/div[2]/div/form/div[4]/div[2]/div/div/div[2]/div[1]/a[1]',
+      nextMonthXpath: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div/div[2]/div/form/div[4]/div[2]/div/div/div[2]/div[1]/a[2]',
+      calendarPaneXpath: '/html/body/div[2]/div[2]/main/div/section/div/div[2]/div/div[1]/div[2]/div[2]/div/div[2]/div/form/div[4]/div[2]/div/div/div[2]/div[2]',
+      dayCellSelector: '.ui-calendar__day:not(.ui-calendar__day--out-of-month) div[role="button"]'
     },
 
     // ----- Place of Service (dropdown) ---------------------------------------

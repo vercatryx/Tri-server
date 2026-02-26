@@ -1,12 +1,33 @@
+const os = require('os');
 const { performLoginSequence } = require('./auth');
 const axios = require('axios');
 const { executeBillingOnPage } = require('./billingActions');
 const uniteSelectors = require('./uniteSelectors');
-const { getPage, getContext, closeBrowser, restartBrowser, BROWSER_COUNT } = require('./browser');
+const {
+    getPage,
+    getContext,
+    closeBrowser,
+    restartBrowser,
+    getActiveCount,
+    getTargetCount,
+    setTargetCount,
+    isDraining,
+    requestDrain,
+    slotClosed,
+    addSlot,
+    MAX_BROWSERS
+} = require('./browser');
 const fs = require('fs');
 const path = require('path');
 
 require('dotenv').config();
+
+// --- Dynamic scaling (CPU under 80%) ---
+const CPU_TARGET_PERCENT = Math.max(1, Math.min(100, parseInt(process.env.CPU_TARGET_PERCENT || '80', 10)));
+const CPU_CHECK_INTERVAL_MS = Math.max(5000, parseInt(process.env.CPU_CHECK_INTERVAL_MS || '15000', 10));
+const WINDOWS_LOAD_FALLBACK_TARGET = 2;
+/** Default number of browsers to start with; then scale up/down as needed. Env: DEFAULT_BROWSERS (default 10). */
+const DEFAULT_BROWSERS = Math.max(1, Math.min(MAX_BROWSERS, parseInt(process.env.DEFAULT_BROWSERS || '10', 10)));
 
 const EMAIL = process.env.UNITEUS_EMAIL;
 const PASSWORD = process.env.UNITEUS_PASSWORD;
@@ -275,20 +296,374 @@ async function billingWorker(initialRequests, emitEvent, source = 'file', apiCon
 
     emitEvent('log', { message: `Processing ${requests.length} requests...` });
 
-    const numLanes = Math.min(BROWSER_COUNT, requests.length);
-    const chunkSize = Math.ceil(requests.length / numLanes);
-    const laneIndices = [];
-    for (let L = 0; L < numLanes; L++) {
-        const start = L * chunkSize;
-        const end = Math.min(start + chunkSize, requests.length);
-        laneIndices.push([]);
-        for (let i = start; i < end; i++) laneIndices[L].push(i);
-    }
-    if (numLanes > 1) {
-        emitEvent('log', { message: `Using ${numLanes} browser(s) in parallel.`, type: 'info' });
+    // Shared queue: pull-based; no client assigned until a browser takes the next index
+    let nextIndex = 0;
+    const takeNext = () => (nextIndex < requests.length ? nextIndex++ : null);
+    const hasWork = () => nextIndex < requests.length;
+
+    setTargetCount(1);
+    const runners = [];
+    const setRunner = (slot, data) => {
+        while (runners.length <= slot) runners.push(null);
+        runners[slot] = data;
+        emitEvent('runners', runners.slice(0, getActiveCount()));
+    };
+
+    emitEvent('config', { browserCount: getActiveCount() });
+
+    /**
+     * Process a single request (one iteration of the old lane loop).
+     * @returns {{ breakLane?: boolean }} breakLane true to stop this runner (login failed, user stop)
+     */
+    async function processOneRequest(slot, i, requests, page, context, emitEvent, source, apiConfig, setRunner, attachConsoleLogger, sleep, isLoggedIn, waitForPageReady) {
+        const req = requests[i];
+        req.status = 'processing';
+        req.message = 'Starting...';
+        setRunner(slot, { clientName: req.name, step: 'Starting...' });
+        emitEvent('queue', requests);
+        emitEvent('log', { message: `Processing ${req.name} (${i + 1}/${requests.length})` });
+
+        let resultSourceStatus = 'unknown';
+
+        if (req.skip) {
+            req.status = 'skipped';
+            setRunner(slot, { clientName: req.name, step: 'Skipped' });
+            emitEvent('log', { message: 'Skipped by config.', type: 'warning' });
+            emitEvent('queue', requests);
+            return {};
+        }
+
+        if (!req.date) {
+            req.status = 'failed';
+            req.message = 'Missing date field.';
+            setRunner(slot, { clientName: req.name, step: 'Failed' });
+            emitEvent('log', { message: 'Missing date field.', type: 'error' });
+            if (source === 'api' && req.orderNumber) {
+                await updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
+            }
+            const orderIds = getOrderIds(req);
+            if (orderIds.length) {
+                await updateOrderBillingStatus(orderIds, 'billing_failed', req.message);
+            }
+            emitEvent('queue', requests);
+            return {};
+        }
+
+        try {
+            const [year, month, day] = req.date.split('-').map(Number);
+            const startDate = new Date(year, month - 1, day);
+            const endDate = new Date(startDate);
+            const isEquipment = req.equipment === true || req.equipment === 'true' || req.equtment === true || req.equtment === 'true';
+            if (!isEquipment) {
+                endDate.setDate(endDate.getDate() + 6);
+            }
+            const formatDate = (d) => {
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                return `${y}-${m}-${day}`;
+            };
+            req.start = formatDate(startDate);
+            req.end = formatDate(endDate);
+            emitEvent('log', { message: isEquipment ? `Date (equipment, single day): ${req.start}` : `Date range: ${req.start} to ${req.end}` });
+        } catch (e) {
+            req.status = 'failed';
+            req.message = `Invalid date: ${e.message}`;
+            setRunner(slot, { clientName: req.name, step: 'Failed' });
+            emitEvent('log', { message: `Invalid date: ${e.message}`, type: 'error' });
+            if (source === 'api' && req.orderNumber) {
+                await updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
+            }
+            const orderIds = getOrderIds(req);
+            if (orderIds.length) {
+                await updateOrderBillingStatus(orderIds, 'billing_failed', req.message);
+            }
+            emitEvent('queue', requests);
+            return {};
+        }
+
+        if (!(await isLoggedIn())) {
+            setRunner(slot, { clientName: req.name, step: 'Logging in...' });
+            emitEvent('log', { message: 'Logging in...' });
+            const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
+            if (!loginOk) {
+                req.status = 'failed';
+                setRunner(slot, { clientName: req.name, step: 'Login failed' });
+                emitEvent('log', { message: 'Login failed. Aborting.', type: 'error' });
+                return { breakLane: true };
+            }
+            await sleep(2000);
+        }
+
+        if (!req.url) {
+            req.status = 'failed';
+            req.message = 'Missing URL.';
+            setRunner(slot, { clientName: req.name, step: 'Failed' });
+            emitEvent('log', { message: 'Missing URL.', type: 'error' });
+            emitEvent('queue', requests);
+            return {};
+        }
+
+        let result = null;
+        let lastResult = null;  // used to skip browser restart when failure was duplicate
+        let loginFailedOnRetry = false;
+        let logicError = false;
+
+        try {
+            setRunner(slot, { clientName: req.name, step: 'Navigating...' });
+            console.log(`[Worker] Navigating to ${req.url}`);
+            await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await waitForPageReady();
+            setRunner(slot, { clientName: req.name, step: 'Filling form...' });
+
+            if (req.proofURL) {
+                req.proofURL = Array.isArray(req.proofURL) ? req.proofURL : [req.proofURL];
+            }
+
+            restartLoop: for (let r = 0; r < RESTART_CYCLES; r++) {
+                if (r > 0) {
+                    emitEvent('log', { message: `Restart ${r}/${RESTART_CYCLES}: shutting down browser, clearing cookies/data, starting fresh...`, type: 'warning' });
+                    await closeBrowser(slot);
+                    page = await getPage(slot);
+                    context = getContext(slot);
+                    attachConsoleLogger(page);
+                    emitEvent('log', { message: 'Logging in (after restart). Login flow clears cookies & storage.', type: 'info' });
+                    const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
+                    if (!loginOk) {
+                        loginFailedOnRetry = true;
+                        req.status = 'failed';
+                        req.message = 'Login failed after browser restart.';
+                        resultSourceStatus = 'billing_failed';
+                        break restartLoop;
+                    }
+                    await sleep(2000);
+                    console.log(`[Worker] Navigating to ${req.url}`);
+                    await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                    await waitForPageReady();
+                }
+
+                for (let f = 0; f < REFRESH_CYCLES; f++) {
+                    if (f > 0) {
+                        emitEvent('log', { message: `Refresh ${f}/${REFRESH_CYCLES}: refreshing page...`, type: 'warning' });
+                        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+                        await waitForPageReady();
+                    }
+
+                    for (let a = 0; a < ATTEMPTS_PER_CYCLE; a++) {
+                        if (a > 0) {
+                            await sleep(SLEEP_ON_ERROR_MS);
+                        }
+                        result = await executeBillingOnPage(page, req);
+                        lastResult = result;
+                        if (result.ok || result.duplicate) break restartLoop;  // duplicate: fail immediately, no retries/restarts
+                        if (!isRetryableError(result.error)) {
+                            logicError = true;
+                            emitEvent('log', { message: `Logic error (non-retryable): ${result.error}. Failing immediately.`, type: 'error' });
+                            break restartLoop;
+                        }
+                        emitEvent('log', { message: `Attempt ${a + 1}/${ATTEMPTS_PER_CYCLE} failed: ${result.error}. Waiting ${SLEEP_ON_ERROR_MS / 1000}s...`, type: 'warning' });
+                    }
+
+                    if (f < REFRESH_CYCLES - 1) {
+                        emitEvent('log', { message: `All ${ATTEMPTS_PER_CYCLE} attempts failed. Will refresh.`, type: 'warning' });
+                    }
+                }
+
+                if (r < RESTART_CYCLES - 1) {
+                    emitEvent('log', { message: `All ${REFRESH_CYCLES} refresh cycles failed. Will restart browser.`, type: 'warning' });
+                }
+            }
+
+            if (loginFailedOnRetry) {
+                emitEvent('log', { message: 'Login failed after restart. Aborting.', type: 'error' });
+            } else if (result) {
+                if (result.ok) {
+                    if (result.verified) {
+                        req.status = 'success';
+                        req.message = `Billed: $${result.amount || req.amount}`;
+                        setRunner(slot, { clientName: req.name, step: 'Complete' });
+                        emitEvent('log', { message: `✅ Success!`, type: 'success' });
+                        resultSourceStatus = 'billing_successful';
+                    } else {
+                        req.status = 'warning';
+                        req.message = 'Submitted but verification failed';
+                        setRunner(slot, { clientName: req.name, step: 'Submitted (unverified)' });
+                        emitEvent('log', { message: `⚠️ Submitted, unverified.`, type: 'warning' });
+                        resultSourceStatus = 'billing_unconfirmed';
+                    }
+                } else {
+                    if (result.duplicate) {
+                        req.status = 'failed';
+                        req.message = result.error || 'Duplicate invoice detected';
+                        setRunner(slot, { clientName: req.name, step: 'Failed' });
+                        emitEvent('log', { message: `❌ Duplicate - marking as failed: ${req.message}`, type: 'error' });
+                        resultSourceStatus = 'billing_failed';
+                    } else {
+                        req.status = 'failed';
+                        req.message = result.error;
+                        setRunner(slot, { clientName: req.name, step: 'Failed' });
+                        emitEvent('log', { message: logicError ? `❌ Failed (logic error): ${result.error}` : `❌ Failed (all retries exhausted): ${result.error}`, type: 'error' });
+                        resultSourceStatus = 'billing_failed';
+                    }
+                }
+            }
+        } catch (e) {
+            req.status = 'failed';
+            req.message = e.message;
+            setRunner(slot, { clientName: req.name, step: 'Failed' });
+            emitEvent('log', { message: `Exception: ${e.message}`, type: 'error' });
+            resultSourceStatus = 'billing_failed';
+
+            const errorMsg = String(e.message || '').toLowerCase();
+            const isBrowserClosed =
+                (errorMsg.includes('target page') && errorMsg.includes('has been closed')) ||
+                (errorMsg.includes('target page') && errorMsg.includes('context or browser has been closed')) ||
+                (errorMsg.includes('page.goto') && errorMsg.includes('has been closed')) ||
+                (errorMsg.includes('browser has been closed')) ||
+                (errorMsg.includes('context has been closed'));
+
+            // Duplicates are final: do not restart browser or retry.
+            if (lastResult && lastResult.duplicate) {
+                req.status = 'failed';
+                req.message = lastResult.error || 'Duplicate invoice detected';
+                setRunner(slot, { clientName: req.name, step: 'Failed' });
+                emitEvent('log', { message: `❌ Duplicate - marking as failed (no restart): ${req.message}`, type: 'error' });
+                resultSourceStatus = 'billing_failed';
+            } else if (isBrowserClosed) {
+                emitEvent('log', { message: 'CRITICAL: Browser/page has been closed. Reopening new browser instance...', type: 'warning' });
+                emitEvent('log', { message: `Error details: ${e.message}`, type: 'error' });
+
+                try {
+                    await closeBrowser(slot);
+                    page = await restartBrowser(slot);
+                    context = getContext(slot);
+                    attachConsoleLogger(page);
+
+                    emitEvent('log', { message: 'Browser restarted successfully. Re-logging in...', type: 'info' });
+
+                    const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
+                    if (!loginOk) {
+                        req.status = 'failed';
+                        req.message = 'Login failed after browser restart.';
+                        emitEvent('log', { message: 'Login failed after browser restart. Aborting.', type: 'error' });
+                        emitEvent('queue', requests);
+                        return { breakLane: true };
+                    }
+
+                    await sleep(2000);
+                    emitEvent('log', { message: 'Browser restarted and logged in. Retrying current request...', type: 'info' });
+
+                    req.status = 'processing';
+                    req.message = 'Retrying after browser restart...';
+                    emitEvent('queue', requests);
+
+                    console.log(`[Worker] Navigating to ${req.url} (after browser restart)`);
+                    await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                    await waitForPageReady();
+
+                    let retryResult = null;
+                    for (let retryAttempt = 0; retryAttempt < ATTEMPTS_PER_CYCLE; retryAttempt++) {
+                        if (retryAttempt > 0) {
+                            await sleep(SLEEP_ON_ERROR_MS);
+                        }
+                        retryResult = await executeBillingOnPage(page, req);
+                        lastResult = retryResult;
+                        if (retryResult.ok || retryResult.duplicate) break;
+                        if (!isRetryableError(retryResult.error)) {
+                            break;
+                        }
+                        emitEvent('log', { message: `Retry attempt ${retryAttempt + 1}/${ATTEMPTS_PER_CYCLE} failed: ${retryResult.error}`, type: 'warning' });
+                    }
+
+                    if (retryResult) {
+                        result = retryResult;
+                        if (retryResult.ok) {
+                            if (retryResult.verified) {
+                                req.status = 'success';
+                                req.message = `Billed: $${retryResult.amount || req.amount}`;
+                                emitEvent('log', { message: `✅ Success after browser restart!`, type: 'success' });
+                                resultSourceStatus = 'billing_successful';
+                            } else {
+                                req.status = 'warning';
+                                req.message = 'Submitted but verification failed';
+                                emitEvent('log', { message: `⚠️ Submitted after browser restart, unverified.`, type: 'warning' });
+                                resultSourceStatus = 'billing_unconfirmed';
+                            }
+                        } else {
+                            if (retryResult.duplicate) {
+                                req.status = 'failed';
+                                req.message = retryResult.error || 'Duplicate invoice detected';
+                                emitEvent('log', { message: `❌ Duplicate after browser restart - marking as failed: ${req.message}`, type: 'error' });
+                                resultSourceStatus = 'billing_failed';
+                            } else {
+                                req.status = 'failed';
+                                req.message = retryResult.error;
+                                emitEvent('log', { message: `❌ Failed after browser restart: ${retryResult.error}`, type: 'error' });
+                                resultSourceStatus = 'billing_failed';
+                            }
+                        }
+                    }
+                } catch (restartError) {
+                    emitEvent('log', { message: `Failed to restart browser: ${restartError.message}`, type: 'error' });
+                    req.status = 'failed';
+                    req.message = `Browser restart failed: ${restartError.message}`;
+                    resultSourceStatus = 'billing_failed';
+                    emitEvent('queue', requests);
+                }
+            } else {
+                await page.screenshot({ path: `error_${slot}_${i}.png` }).catch(() => {});
+            }
+        }
+
+        const shouldReportFailure = resultSourceStatus !== 'billing_failed' || isPermanentFailure(req.message);
+
+        if (!shouldReportFailure) {
+            emitEvent('log', { message: `Failure not reported to API (transient/retryable). Order left unchanged for retry.`, type: 'info' });
+        }
+
+        if (shouldReportFailure && source === 'api' && req.orderNumber) {
+            const extResult = await updateOrderStatus(req.orderNumber, resultSourceStatus, apiConfig);
+            if (extResult.ok) {
+                emitEvent('log', { message: 'Extension API: status updated.', type: 'info' });
+            } else {
+                emitEvent('log', { message: `Extension API: failed to update status — ${extResult.error}`, type: 'error' });
+            }
+        }
+
+        const orderIds = getOrderIds(req);
+        if (shouldReportFailure && orderIds.length > 0) {
+            let tssNotes = '';
+            if (resultSourceStatus === 'billing_successful') {
+                tssNotes = `Payment processed successfully. Amount: $${result?.amount || req.amount || 'N/A'}`;
+            } else if (resultSourceStatus === 'billing_failed') {
+                tssNotes = req.message || 'Billing failed';
+            } else if (resultSourceStatus === 'billing_unconfirmed') {
+                tssNotes = req.message || 'Billing submitted but unverified';
+            } else {
+                tssNotes = req.message || '';
+            }
+
+            emitEvent('log', { message: `Calling TSS API to update status: ${resultSourceStatus} for ${orderIds.length} order(s)`, type: 'info' });
+            const tssResult = await updateOrderBillingStatus(orderIds, resultSourceStatus, tssNotes);
+            if (tssResult.ok) {
+                emitEvent('log', { message: `TSS API: billing status updated successfully for ${orderIds.length} order(s).`, type: 'success' });
+            } else {
+                emitEvent('log', { message: `TSS API: failed to update billing status — ${tssResult.error}`, type: 'error' });
+            }
+        } else if (orderIds.length === 0) {
+            emitEvent('log', { message: 'No orderIds found in request, skipping TSS API update.', type: 'warning' });
+        }
+
+        emitEvent('queue', requests);
+
+        if (loginFailedOnRetry) {
+            return { breakLane: true };
+        }
+
+        return {};
     }
 
-    async function processLane(slot, requests, indices, emitEvent, source, apiConfig, stopCheck) {
+    async function runOneLane(slot) {
         let page = await getPage(slot);
         let context = getContext(slot);
 
@@ -305,14 +680,12 @@ async function billingWorker(initialRequests, emitEvent, source = 'file', apiCon
         attachConsoleLogger(page);
 
         const sleep = ms => new Promise(r => setTimeout(r, ms));
-
         const isLoggedIn = async () => {
             try {
                 const currentUrl = page.url();
                 return currentUrl.includes('uniteus.io') && !currentUrl.includes('auth');
             } catch (e) { return false; }
         };
-
         const pageReadyId = uniteSelectors.billing.pageReady.id;
         const waitForPageReady = async () => {
             try {
@@ -322,349 +695,127 @@ async function billingWorker(initialRequests, emitEvent, source = 'file', apiCon
             }
         };
 
-        laneLoop: for (const i of indices) {
-            if (stopCheck && stopCheck()) {
-                emitEvent('log', { message: 'Stop signal received. Stopping process...', type: 'warning' });
+        let i;
+        while ((i = takeNext()) !== null && !stopCheck() && !isDraining(slot)) {
+            if (stopCheck()) {
                 if (requests[i]) {
                     requests[i].status = 'stopped';
                     requests[i].message = 'Process stopped by user';
                 }
                 emitEvent('queue', requests);
-                break laneLoop;
+                emitEvent('log', { message: 'Stop signal received. Stopping process...', type: 'warning' });
+                break;
             }
-
-            const req = requests[i];
-
-            req.status = 'processing';
-            req.message = 'Starting...';
-            emitEvent('queue', requests);
-            emitEvent('log', { message: `Processing ${req.name} (${i + 1}/${requests.length})` });
-
-            let resultSourceStatus = 'unknown';
-
-            if (req.skip) {
-                req.status = 'skipped';
-                emitEvent('log', { message: 'Skipped by config.', type: 'warning' });
-                emitEvent('queue', requests);
-                continue;
-            }
-
-            if (!req.date) {
-                req.status = 'failed';
-                req.message = 'Missing date field.';
-                emitEvent('log', { message: 'Missing date field.', type: 'error' });
-                if (source === 'api' && req.orderNumber) {
-                    await updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
-                }
-                const orderIds = getOrderIds(req);
-                if (orderIds.length) {
-                    await updateOrderBillingStatus(orderIds, 'billing_failed', req.message);
-                }
-                emitEvent('queue', requests);
-                continue;
-            }
-
-            try {
-                const [year, month, day] = req.date.split('-').map(Number);
-                const startDate = new Date(year, month - 1, day);
-                const endDate = new Date(startDate);
-                endDate.setDate(endDate.getDate() + 6);
-                const formatDate = (d) => {
-                    const y = d.getFullYear();
-                    const m = String(d.getMonth() + 1).padStart(2, '0');
-                    const day = String(d.getDate()).padStart(2, '0');
-                    return `${y}-${m}-${day}`;
-                };
-                req.start = formatDate(startDate);
-                req.end = formatDate(endDate);
-                emitEvent('log', { message: `Date range: ${req.start} to ${req.end}` });
-            } catch (e) {
-                req.status = 'failed';
-                req.message = `Invalid date: ${e.message}`;
-                emitEvent('log', { message: `Invalid date: ${e.message}`, type: 'error' });
-                if (source === 'api' && req.orderNumber) {
-                    await updateOrderStatus(req.orderNumber, 'billing_failed', apiConfig);
-                }
-                const orderIds = getOrderIds(req);
-                if (orderIds.length) {
-                    await updateOrderBillingStatus(orderIds, 'billing_failed', req.message);
-                }
-                emitEvent('queue', requests);
-                continue;
-            }
-
-            if (!(await isLoggedIn())) {
-                emitEvent('log', { message: 'Logging in...' });
-                const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
-                if (!loginOk) {
-                    req.status = 'failed';
-                    emitEvent('log', { message: 'Login failed. Aborting.', type: 'error' });
-                    break laneLoop;
-                }
-                await sleep(2000);
-            }
-
-            if (!req.url) {
-                req.status = 'failed';
-                req.message = 'Missing URL.';
-                emitEvent('log', { message: 'Missing URL.', type: 'error' });
-                emitEvent('queue', requests);
-                continue;
-            }
-
-            let result = null;
-            let loginFailedOnRetry = false;
-            let logicError = false;
-
-            try {
-                console.log(`[Worker] Navigating to ${req.url}`);
-                await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                await waitForPageReady();
-
-                if (req.proofURL) {
-                    req.proofURL = Array.isArray(req.proofURL) ? req.proofURL : [req.proofURL];
-                }
-
-                restartLoop: for (let r = 0; r < RESTART_CYCLES; r++) {
-                    if (r > 0) {
-                        emitEvent('log', { message: `Restart ${r}/${RESTART_CYCLES}: shutting down browser, clearing cookies/data, starting fresh...`, type: 'warning' });
-                        await closeBrowser(slot);
-                        page = await getPage(slot);
-                        context = getContext(slot);
-                        attachConsoleLogger(page);
-                        emitEvent('log', { message: 'Logging in (after restart). Login flow clears cookies & storage.', type: 'info' });
-                        const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
-                        if (!loginOk) {
-                            loginFailedOnRetry = true;
-                            req.status = 'failed';
-                            req.message = 'Login failed after browser restart.';
-                            resultSourceStatus = 'billing_failed';
-                            break restartLoop;
-                        }
-                        await sleep(2000);
-                        console.log(`[Worker] Navigating to ${req.url}`);
-                        await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                        await waitForPageReady();
-                    }
-
-                    refreshLoop: for (let f = 0; f < REFRESH_CYCLES; f++) {
-                        if (f > 0) {
-                            emitEvent('log', { message: `Refresh ${f}/${REFRESH_CYCLES}: refreshing page...`, type: 'warning' });
-                            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-                            await waitForPageReady();
-                        }
-
-                        for (let a = 0; a < ATTEMPTS_PER_CYCLE; a++) {
-                            if (a > 0) {
-                                await sleep(SLEEP_ON_ERROR_MS);
-                            }
-                            result = await executeBillingOnPage(page, req);
-                            if (result.ok || result.duplicate) break restartLoop;
-                            if (!isRetryableError(result.error)) {
-                                logicError = true;
-                                emitEvent('log', { message: `Logic error (non-retryable): ${result.error}. Failing immediately.`, type: 'error' });
-                                break restartLoop;
-                            }
-                            emitEvent('log', { message: `Attempt ${a + 1}/${ATTEMPTS_PER_CYCLE} failed: ${result.error}. Waiting ${SLEEP_ON_ERROR_MS / 1000}s...`, type: 'warning' });
-                        }
-
-                        if (f < REFRESH_CYCLES - 1) {
-                            emitEvent('log', { message: `All ${ATTEMPTS_PER_CYCLE} attempts failed. Will refresh.`, type: 'warning' });
-                        }
-                    }
-
-                    if (r < RESTART_CYCLES - 1) {
-                        emitEvent('log', { message: `All ${REFRESH_CYCLES} refresh cycles failed. Will restart browser.`, type: 'warning' });
-                    }
-                }
-
-                if (loginFailedOnRetry) {
-                    emitEvent('log', { message: 'Login failed after restart. Aborting.', type: 'error' });
-                } else if (result) {
-                    if (result.ok) {
-                        if (result.verified) {
-                            req.status = 'success';
-                            req.message = `Billed: $${result.amount || req.amount}`;
-                            emitEvent('log', { message: `✅ Success!`, type: 'success' });
-                            resultSourceStatus = 'billing_successful';
-                        } else {
-                            req.status = 'warning';
-                            req.message = 'Submitted but verification failed';
-                            emitEvent('log', { message: `⚠️ Submitted, unverified.`, type: 'warning' });
-                            resultSourceStatus = 'billing_unconfirmed';
-                        }
-                    } else {
-                        if (result.duplicate) {
-                            req.status = 'success';
-                            req.message = 'Duplicate - already exists';
-                            emitEvent('log', { message: `✅ Duplicate found - marking as successful.`, type: 'success' });
-                            resultSourceStatus = 'billing_successful';
-                        } else {
-                            req.status = 'failed';
-                            req.message = result.error;
-                            emitEvent('log', { message: logicError ? `❌ Failed (logic error): ${result.error}` : `❌ Failed (all retries exhausted): ${result.error}`, type: 'error' });
-                            resultSourceStatus = 'billing_failed';
-                        }
-                    }
-                }
-            } catch (e) {
-                req.status = 'failed';
-                req.message = e.message;
-                emitEvent('log', { message: `Exception: ${e.message}`, type: 'error' });
-                resultSourceStatus = 'billing_failed';
-
-                const errorMsg = String(e.message || '').toLowerCase();
-                const isBrowserClosed =
-                    (errorMsg.includes('target page') && errorMsg.includes('has been closed')) ||
-                    (errorMsg.includes('target page') && errorMsg.includes('context or browser has been closed')) ||
-                    (errorMsg.includes('page.goto') && errorMsg.includes('has been closed')) ||
-                    (errorMsg.includes('browser has been closed')) ||
-                    (errorMsg.includes('context has been closed'));
-
-                if (isBrowserClosed) {
-                    emitEvent('log', { message: 'CRITICAL: Browser/page has been closed. Reopening new browser instance...', type: 'warning' });
-                    emitEvent('log', { message: `Error details: ${e.message}`, type: 'error' });
-
-                    try {
-                        await closeBrowser(slot);
-                        page = await restartBrowser(slot);
-                        context = getContext(slot);
-                        attachConsoleLogger(page);
-
-                        emitEvent('log', { message: 'Browser restarted successfully. Re-logging in...', type: 'info' });
-
-                        const loginOk = await performLoginSequence(EMAIL, PASSWORD, page, context);
-                        if (!loginOk) {
-                            req.status = 'failed';
-                            req.message = 'Login failed after browser restart.';
-                            emitEvent('log', { message: 'Login failed after browser restart. Aborting.', type: 'error' });
-                            emitEvent('queue', requests);
-                            break laneLoop;
-                        }
-
-                        await sleep(2000);
-                        emitEvent('log', { message: 'Browser restarted and logged in. Retrying current request...', type: 'info' });
-
-                        req.status = 'processing';
-                        req.message = 'Retrying after browser restart...';
-                        emitEvent('queue', requests);
-
-                        console.log(`[Worker] Navigating to ${req.url} (after browser restart)`);
-                        await page.goto(req.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                        await waitForPageReady();
-
-                        let retryResult = null;
-                        for (let retryAttempt = 0; retryAttempt < ATTEMPTS_PER_CYCLE; retryAttempt++) {
-                            if (retryAttempt > 0) {
-                                await sleep(SLEEP_ON_ERROR_MS);
-                            }
-                            retryResult = await executeBillingOnPage(page, req);
-                            if (retryResult.ok || retryResult.duplicate) break;
-                            if (!isRetryableError(retryResult.error)) {
-                                break;
-                            }
-                            emitEvent('log', { message: `Retry attempt ${retryAttempt + 1}/${ATTEMPTS_PER_CYCLE} failed: ${retryResult.error}`, type: 'warning' });
-                        }
-
-                        if (retryResult) {
-                            result = retryResult;
-                            if (retryResult.ok) {
-                                if (retryResult.verified) {
-                                    req.status = 'success';
-                                    req.message = `Billed: $${retryResult.amount || req.amount}`;
-                                    emitEvent('log', { message: `✅ Success after browser restart!`, type: 'success' });
-                                    resultSourceStatus = 'billing_successful';
-                                } else {
-                                    req.status = 'warning';
-                                    req.message = 'Submitted but verification failed';
-                                    emitEvent('log', { message: `⚠️ Submitted after browser restart, unverified.`, type: 'warning' });
-                                    resultSourceStatus = 'billing_unconfirmed';
-                                }
-                            } else {
-                                if (retryResult.duplicate) {
-                                    req.status = 'success';
-                                    req.message = 'Duplicate - already exists';
-                                    emitEvent('log', { message: `✅ Duplicate found after browser restart - marking as successful.`, type: 'success' });
-                                    resultSourceStatus = 'billing_successful';
-                                } else {
-                                    req.status = 'failed';
-                                    req.message = retryResult.error;
-                                    emitEvent('log', { message: `❌ Failed after browser restart: ${retryResult.error}`, type: 'error' });
-                                    resultSourceStatus = 'billing_failed';
-                                }
-                            }
-                        }
-                    } catch (restartError) {
-                        emitEvent('log', { message: `Failed to restart browser: ${restartError.message}`, type: 'error' });
-                        req.status = 'failed';
-                        req.message = `Browser restart failed: ${restartError.message}`;
-                        resultSourceStatus = 'billing_failed';
-                        emitEvent('queue', requests);
-                    }
-                } else {
-                    await page.screenshot({ path: `error_${slot}_${i}.png` }).catch(() => {});
-                }
-            }
-
-            const shouldReportFailure = resultSourceStatus !== 'billing_failed' || isPermanentFailure(req.message);
-
-            if (!shouldReportFailure) {
-                emitEvent('log', { message: `Failure not reported to API (transient/retryable). Order left unchanged for retry.`, type: 'info' });
-            }
-
-            if (shouldReportFailure && source === 'api' && req.orderNumber) {
-                const extResult = await updateOrderStatus(req.orderNumber, resultSourceStatus, apiConfig);
-                if (extResult.ok) {
-                    emitEvent('log', { message: 'Extension API: status updated.', type: 'info' });
-                } else {
-                    emitEvent('log', { message: `Extension API: failed to update status — ${extResult.error}`, type: 'error' });
-                }
-            }
-
-            const orderIds = getOrderIds(req);
-            if (shouldReportFailure && orderIds.length > 0) {
-                let tssNotes = '';
-                if (resultSourceStatus === 'billing_successful') {
-                    if (result?.duplicate || req.message?.includes('Duplicate')) {
-                        tssNotes = `Duplicate invoice detected - already exists in system. Amount: $${result?.amount || req.amount || 'N/A'}`;
-                    } else {
-                        tssNotes = `Payment processed successfully. Amount: $${result?.amount || req.amount || 'N/A'}`;
-                    }
-                } else if (resultSourceStatus === 'billing_failed') {
-                    tssNotes = req.message || 'Billing failed';
-                } else if (resultSourceStatus === 'billing_unconfirmed') {
-                    tssNotes = req.message || 'Billing submitted but unverified';
-                } else {
-                    tssNotes = req.message || '';
-                }
-
-                emitEvent('log', { message: `Calling TSS API to update status: ${resultSourceStatus} for ${orderIds.length} order(s)`, type: 'info' });
-                const tssResult = await updateOrderBillingStatus(orderIds, resultSourceStatus, tssNotes);
-                if (tssResult.ok) {
-                    emitEvent('log', { message: `TSS API: billing status updated successfully for ${orderIds.length} order(s).`, type: 'success' });
-                } else {
-                    emitEvent('log', { message: `TSS API: failed to update billing status — ${tssResult.error}`, type: 'error' });
-                }
-            } else if (orderIds.length === 0) {
-                emitEvent('log', { message: 'No orderIds found in request, skipping TSS API update.', type: 'warning' });
-            }
-
-            emitEvent('queue', requests);
-
-            if (loginFailedOnRetry) {
-                break laneLoop;
-            }
-
-            if (stopCheck && stopCheck()) {
-                emitEvent('log', { message: 'Stop signal received. Stopping process after current client...', type: 'warning' });
-                break laneLoop;
-            }
-
+            const out = await processOneRequest(slot, i, requests, page, context, emitEvent, source, apiConfig, setRunner, attachConsoleLogger, sleep, isLoggedIn, waitForPageReady);
+            if (out && out.breakLane) break;
             await sleep(1000);
+        }
+
+        setRunner(slot, null);
+        if (isDraining(slot)) {
+            await closeBrowser(slot);
+            slotClosed(slot);
+            emitEvent('config', { browserCount: getActiveCount() });
+            emitEvent('runners', runners.slice(0, getActiveCount()));
         }
     }
 
-    await Promise.all(laneIndices.map((indices, slot) => processLane(slot, requests, indices, emitEvent, source, apiConfig, stopCheck)));
+    const runnerPromises = [];
+    let runEnding = false;
+
+    function startRunner(slot) {
+        runnerPromises.push(runOneLane(slot));
+    }
+
+    // Ensure slot 0 exists (launchBrowser already called by server)
+    startRunner(0);
+
+    // Start with DEFAULT_BROWSERS (env), then scale as needed
+    setTargetCount(DEFAULT_BROWSERS);
+    const initialToAdd = Math.max(0, DEFAULT_BROWSERS - 1);
+    for (let a = 0; a < initialToAdd; a++) {
+        const added = await addSlot();
+        if (added && !runEnding) {
+            startRunner(getActiveCount() - 1);
+            emitEvent('config', { browserCount: getActiveCount() });
+            emitEvent('runners', runners.slice(0, getActiveCount()));
+        }
+    }
+
+    // Process CPU (same as dashboard "CPU: X%") + load average. Scale up when *our* process has headroom.
+    let lastCpuUsage = process.cpuUsage();
+    let lastCpuTime = Date.now();
+
+    let scalingInterval = setInterval(() => {
+        try {
+            if (runEnding || (stopCheck && stopCheck())) return;
+            const elapsedSec = (Date.now() - lastCpuTime) / 1000;
+            const delta = process.cpuUsage(lastCpuUsage);
+            lastCpuUsage = process.cpuUsage();
+            lastCpuTime = Date.now();
+            const cpuMicro = (delta && (Number(delta.user) + Number(delta.system))) || 0;
+            const processCpuPercent = elapsedSec > 0 ? (cpuMicro / 1e6 / elapsedSec) * 100 : 0;
+
+            const load = os.loadavg()[0];
+            const cpus = Math.max(1, (os.cpus && os.cpus()) ? os.cpus().length : 1);
+            const threshold = (CPU_TARGET_PERCENT / 100) * cpus;
+            const loadUnderThreshold = load === 0 || load < threshold;
+            const processUnderTarget = processCpuPercent < CPU_TARGET_PERCENT;
+            const hasHeadroom = loadUnderThreshold || processUnderTarget;
+            const overloaded = !loadUnderThreshold || !processUnderTarget;
+
+            let target;
+            if (load === 0) {
+                if (processUnderTarget && hasWork() && getActiveCount() < MAX_BROWSERS) {
+                    target = Math.min(MAX_BROWSERS, getActiveCount() + 1);
+                } else if (!processUnderTarget && getActiveCount() > 1) {
+                    target = Math.max(1, getActiveCount() - 1);
+                } else {
+                    target = Math.min(MAX_BROWSERS, Math.max(1, getTargetCount() || WINDOWS_LOAD_FALLBACK_TARGET));
+                }
+            } else if (hasHeadroom && hasWork() && getActiveCount() < MAX_BROWSERS) {
+                target = Math.min(MAX_BROWSERS, getActiveCount() + 1);
+            } else if (overloaded && getActiveCount() > 1) {
+                target = Math.max(1, getActiveCount() - 1);
+            } else {
+                target = getTargetCount();
+            }
+            setTargetCount(target);
+
+            const active = getActiveCount();
+            if (active > target) {
+                for (let k = 0; k < active - target; k++) {
+                    requestDrain(active - 1 - k);
+                }
+            }
+            if (active < target && hasWork() && !runEnding) {
+                const toAdd = target - active;
+                for (let a = 0; a < toAdd; a++) {
+                    addSlot().then(added => {
+                        if (added && !runEnding) {
+                            startRunner(getActiveCount() - 1);
+                            emitEvent('config', { browserCount: getActiveCount() });
+                        }
+                    });
+                }
+            }
+        } catch (err) {
+            console.error('[Worker] Scaling tick error (non-fatal):', err.message);
+        }
+    }, CPU_CHECK_INTERVAL_MS);
+
+    // Wait until queue is drained
+    await new Promise((resolve) => {
+        const check = () => {
+            if (nextIndex >= requests.length) resolve();
+            else setTimeout(check, 500);
+        };
+        check();
+    });
+    runEnding = true;
+    clearInterval(scalingInterval);
+
+    await Promise.all(runnerPromises);
 
     emitEvent('log', { message: 'Billing Cycle Completed.' });
 }

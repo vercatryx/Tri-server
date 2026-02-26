@@ -1,13 +1,18 @@
 {
   "name": "df-billing-automation-server",
   "version": "1.0.0",
-  "description": "Server-side automation for DF Billing using Playwright",
-  "main": "src/server.js",
+  "description": "Server-side automation for Triangle Square using Playwright",
+  "main": "electron/main.js",
   "scripts": {
     "start": "node src/server.js",
+    "electron": "electron .",
     "restart": "node restart.js",
     "dev": "lsof -ti:3500 | xargs kill -9 2>/dev/null; node src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build:win": "npm run download-node && electron-builder --win",
+    "build:mac": "npm run download-node && electron-builder --mac",
+    "build:mac:app": "npm run download-node && electron-builder --mac --dir",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "download-node": "node scripts/download-node.js"
   },
   "dependencies": {
     "axios": "^1.13.2",
@@ -15,5 +20,47 @@
     "express": "^4.18.2",
     "playwright": "^1.40.1"
   },
-  "type": "commonjs"
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "type": "commonjs",
+  "build": {
+    "appId": "com.dfbilling.automation",
+    "productName": "Billing Automation",
+    "directories": {
+      "output": "dist"
+    },
+    "asar": false,
+    "files": [
+      "package.json",
+      ".env",
+      ".env.example",
+      "electron/**/*",
+      "src/**/*",
+      "public/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.business"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "extraResources": [
+      {
+        "from": "node-runtime",
+        "to": "node"
+      }
+    ]
+  }
 }

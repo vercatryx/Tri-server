@@ -30,6 +30,9 @@ login_*.png
 login_flow_error.png
 login_timeout.png
 
+# Embedded Node runtime (downloaded by scripts/download-node.js)
+node-runtime/
+
 # Build / output (if you add any later)
 dist/
 build/

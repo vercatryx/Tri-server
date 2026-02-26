@@ -48,6 +48,20 @@ header {
 
 .badge.connected { background: var(--success); color: #000; font-weight: bold; }
 .badge.disconnected { background: var(--error); }
+.badge.badge-muted { background: var(--bg-card); color: var(--text-muted); }
+.badge.unauthorized { background: var(--error); color: #fff; }
+.header-badges { display: flex; align-items: center; gap: 0.5rem; }
+
+.device-unauthorized-banner {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid var(--error);
+    border-radius: 0.375rem;
+    color: var(--text-main);
+    margin-bottom: 0.5rem;
+}
+.controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .summary-bar {
     padding: 0.6rem 0.75rem;
@@ -69,6 +83,36 @@ header {
     font-size: 0.85rem;
     color: var(--text-muted);
     opacity: 0.9;
+}
+
+.runners-section {
+    margin-bottom: 1rem;
+}
+.runners-title {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    margin: 0 0 0.5rem 0;
+    font-weight: 600;
+}
+.runners-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+}
+.runner-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    padding: 0.75rem 1rem;
+}
+.runner-card .runner-name {
+    font-weight: 600;
+    color: var(--text-main);
+    margin-bottom: 0.25rem;
+}
+.runner-card .runner-step {
+    font-size: 0.85rem;
+    color: var(--text-muted);
 }
 
 .controls {
@@ -169,9 +213,14 @@ table {
 th { text-align: left; color: var(--text-muted); padding: 0.5rem; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-card); }
 td { padding: 0.5rem; border-bottom: 1px solid var(--border); }
 
-.col-select { width: 2.5rem; text-align: center; }
+.col-select { width: 4.5rem; text-align: center; cursor: crosshair; user-select: none; vertical-align: middle; }
+.col-select .select-actions { display: block; margin-top: 2px; }
+.col-select .link-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.7rem; padding: 0; text-decoration: underline; }
+.col-select .link-btn:hover { color: var(--text); }
 .col-orders { width: 4rem; text-align: right; }
 .col-amount { width: 5.5rem; text-align: right; white-space: nowrap; }
+.col-equipment { width: 5rem; text-align: center; }
+.equipment-badge { background: var(--accent); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
 .col-amount,
 td.col-orders { font-variant-numeric: tabular-nums; }
 
@@ -201,3 +250,73 @@ td.col-orders { font-variant-numeric: tabular-nums; }
 .line.dimmed { color: #666; }
 .line.error { color: #f87171; }
 .line.success { color: #4ade80; }
+
+/* Excel import modal */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+}
+.modal-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+    max-width: 520px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+.modal-card h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.1rem;
+    color: var(--text-main);
+}
+.modal-hint {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin: 0 0 1rem 0;
+}
+.modal-mapping {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+.modal-mapping label {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.9rem;
+}
+.modal-mapping label span {
+    min-width: 5rem;
+    color: var(--text-muted);
+}
+.modal-mapping select {
+    flex: 1;
+    background: var(--bg-dark);
+    color: var(--text-main);
+    border: 1px solid var(--border);
+    border-radius: 0.375rem;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.9rem;
+}
+.modal-preview {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+}
+.modal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+.modal-actions button:first-of-type { background: var(--success); }
+.modal-actions button:nth-of-type(2) { background: var(--accent); }
+.modal-actions button:last-of-type { background: var(--bg-dark); color: var(--text-muted); border: 1px solid var(--border); }
